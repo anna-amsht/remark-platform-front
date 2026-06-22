@@ -1,0 +1,1083 @@
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  ClipboardList,
+  FlipHorizontal,
+  LogOut,
+  Moon,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Send,
+  ShieldCheck,
+  Sun,
+  UserCheck,
+  X,
+} from "lucide-react";
+import { api, session } from "./api";
+import type { Branch, CreateRemarkPayload, RegisterPayload, Remark, RemarkStatus, RoleCode, User, UserInfo } from "./types";
+
+const statuses: Array<RemarkStatus | ""> = ["", "NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"];
+const roleOptions: RoleCode[] = ["APPLICANT", "MASTER", "BRANCH_HEAD"];
+type View = "remarks" | "approvals";
+type Theme = "light" | "dark";
+
+const statusLabel: Record<RemarkStatus, string> = {
+  NEW: "Новое",
+  ASSIGNED: "Назначено",
+  IN_PROGRESS: "В работе",
+  RESOLVED: "Устранено",
+  CLOSED: "Закрыто",
+};
+
+const roleLabel: Record<RoleCode, string> = {
+  APPLICANT: "Заявитель",
+  MASTER: "Организация, ответственная за устранение",
+  BRANCH_HEAD: "Ответственный",
+  ADMIN: "Администратор",
+};
+
+const statusClass: Record<RemarkStatus, string> = {
+  NEW: "new",
+  ASSIGNED: "assigned",
+  IN_PROGRESS: "progress",
+  RESOLVED: "resolved",
+  CLOSED: "closed",
+};
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("ru-RU").format(new Date(value));
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function hasRole(user: UserInfo | null, roles: RoleCode[]) {
+  return Boolean(user?.roles.some((role) => roles.includes(role)));
+}
+
+function branchName(branches: Branch[], id?: string | null) {
+  const branch = branches.find((item) => item.id === id);
+  return branch ? `${branch.code} · ${branch.name}` : "—";
+}
+
+function userName(usersById: Record<string, User | UserInfo>, id?: string | null) {
+  if (!id) return "—";
+  return usersById[id]?.fullName ?? id;
+}
+
+export function App() {
+  const [user, setUser] = useState<UserInfo | null>(session.user);
+  const [activeView, setActiveView] = useState<View>("remarks");
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pendingUsers, setPendingUsers] = useState<User[]>([]);
+  const [masters, setMasters] = useState<User[]>([]);
+  const [usersById, setUsersById] = useState<Record<string, User | UserInfo>>({});
+  const [statusFilter, setStatusFilter] = useState<RemarkStatus | "">("");
+  const [branchFilter, setBranchFilter] = useState("");
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("remark.theme") as Theme | null) ?? "light");
+  const [inverted, setInverted] = useState(() => localStorage.getItem("remark.inverted") === "true");
+
+  const selectedRemark = useMemo(
+    () => remarks.find((remark) => remark.id === selectedId) ?? null,
+    [remarks, selectedId],
+  );
+
+  const visibleRemarks = useMemo(() => {
+    const text = query.trim().toLowerCase();
+    if (!text) return remarks;
+    return remarks.filter((remark) =>
+      [remark.remarkNumber, remark.objectBuilding, remark.description, statusLabel[remark.status]]
+        .join(" ")
+        .toLowerCase()
+        .includes(text),
+    );
+  }, [query, remarks]);
+
+  const ownBranchRemarks = useMemo(
+    () => visibleRemarks.filter((remark) => remark.branchId === user?.branchId),
+    [visibleRemarks, user?.branchId],
+  );
+
+  const detailRemark = useMemo(() => {
+    if (!selectedRemark) return null;
+    if (hasRole(user, ["ADMIN", "BRANCH_HEAD"])) {
+      const canAssignOrganization =
+        selectedRemark.branchId === user?.branchId &&
+        selectedRemark.status === "NEW" &&
+        !selectedRemark.assignedMasterId &&
+        !selectedRemark.resolvedAt &&
+        !selectedRemark.closedAt &&
+        !selectedRemark.reportSentAt;
+      return canAssignOrganization ? selectedRemark : null;
+    }
+    return selectedRemark;
+  }, [selectedRemark, user]);
+
+  useEffect(() => {
+    void loadBranches(false);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("remark.theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("remark.inverted", String(inverted));
+  }, [inverted]);
+
+  useEffect(() => {
+    if (user) {
+      setSelectedId(null);
+      setMasters([]);
+      setPendingUsers([]);
+      setUsersById({});
+      setStatusFilter("");
+      setBranchFilter("");
+      cacheUsers([user]);
+      void refreshWorkplace();
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (user) {
+      void refreshWorkplace();
+    }
+  }, [statusFilter, branchFilter]);
+
+  useEffect(() => {
+    if (!user || hasRole(user, ["ADMIN", "BRANCH_HEAD"])) return;
+    setActiveView("remarks");
+  }, [user]);
+
+  function cacheUsers(users: Array<User | UserInfo>) {
+    setUsersById((current) => {
+      const next = { ...current };
+      users.forEach((item) => {
+        const id = "id" in item ? item.id : item.userId;
+        next[id] = item;
+      });
+      return next;
+    });
+  }
+
+  async function loadBranches(showErrors = true) {
+    setBranchesLoading(true);
+    try {
+      const loadedBranches = await api.branches();
+      setBranches(loadedBranches);
+      if (showErrors && loadedBranches.length === 0) {
+        setMessage("Справочник филиалов пуст. Проверьте, что reference-service запущен и Liquibase seed-branches применен.");
+      }
+    } catch (error) {
+      if (showErrors) {
+        setMessage(error instanceof Error ? error.message : "Не удалось загрузить филиалы");
+      }
+    } finally {
+      setBranchesLoading(false);
+    }
+  }
+
+  async function refreshWorkplace() {
+    setLoading(true);
+    setMessage("");
+    try {
+      const branchId = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? branchFilter || undefined : undefined;
+      const data = await api.remarks(statusFilter || undefined, branchId);
+      const preferredRemark = hasRole(user, ["ADMIN", "BRANCH_HEAD"])
+        ? data.find((item) => item.branchId === user?.branchId) ?? data[0]
+        : data[0];
+      setRemarks(data);
+      setSelectedId(preferredRemark?.id ?? null);
+      void loadRemarkUsers(data);
+      if (hasRole(user, ["ADMIN", "BRANCH_HEAD"])) {
+        const masterBranch = data[0]?.branchId || user?.branchId || branchFilter;
+        if (masterBranch) {
+          const loadedMasters = await api.usersByRole(masterBranch, "MASTER");
+          setMasters(loadedMasters);
+          cacheUsers(loadedMasters);
+        }
+        const loadedPendingUsers = await api.pendingUsers();
+        setPendingUsers(loadedPendingUsers);
+        cacheUsers(loadedPendingUsers);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Не удалось обновить журнал");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleLogout() {
+    await api.logout();
+    setUser(null);
+    setRemarks([]);
+    setPendingUsers([]);
+    setMasters([]);
+    setUsersById({});
+    setActiveView("remarks");
+  }
+
+  function replaceRemark(updated: Remark) {
+    setRemarks((items) => {
+      const exists = items.some((item) => item.id === updated.id);
+      return exists ? items.map((item) => (item.id === updated.id ? updated : item)) : [updated, ...items];
+    });
+    setSelectedId(updated.id);
+  }
+
+  async function ensureUserLoaded(id?: string | null) {
+    if (!id || usersById[id]) return;
+    try {
+      cacheUsers([await api.user(id)]);
+    } catch {
+      // The id fallback remains visible if the user is unavailable to the current actor.
+    }
+  }
+
+  async function loadRemarkUsers(items: Remark[]) {
+    const ids = Array.from(
+      new Set(
+        items
+          .flatMap((item) => [item.createdByUserId, item.assignedMasterId])
+          .filter((id): id is string => typeof id === "string" && !usersById[id]),
+      ),
+    );
+    const loaded = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          return await api.user(id);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    cacheUsers(loaded.filter((item): item is User => Boolean(item)));
+  }
+
+  if (!user) {
+    return (
+      <AuthScreen
+        branches={branches}
+        mode={authMode}
+        message={message}
+        branchesLoading={branchesLoading}
+        onModeChange={setAuthMode}
+        onMessage={setMessage}
+        onReloadBranches={() => loadBranches(true)}
+        onLogin={setUser}
+      />
+    );
+  }
+
+  return (
+    <div className={`app-shell theme-${theme}${inverted ? " inverted" : ""}`}>
+      <aside className="sidebar">
+        <div className="brand">
+          <ClipboardList size={28} />
+          <div>
+            <strong>Журнал замечаний</strong>
+            <span>Производственный контур</span>
+          </div>
+        </div>
+
+        <div className="profile">
+          <span className="avatar">{user.fullName.slice(0, 1).toUpperCase()}</span>
+          <div>
+            <strong>{user.fullName}</strong>
+            <span>{user.roles.map((role) => roleLabel[role]).join(", ")}</span>
+          </div>
+        </div>
+
+        <nav className="side-nav">
+          <button className={activeView === "remarks" ? "active" : ""} type="button" onClick={() => setActiveView("remarks")}>
+            <ClipboardList size={18} /> Замечания
+          </button>
+          {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
+            <button className={activeView === "approvals" ? "active" : ""} type="button" onClick={() => setActiveView("approvals")}>
+              <UserCheck size={18} /> Согласование
+              <span>{pendingUsers.length}</span>
+            </button>
+          )}
+        </nav>
+
+        <div className="branch-card">
+          <span>Филиал</span>
+          <strong>{branchName(branches, user.branchId)}</strong>
+        </div>
+
+        <button className="ghost-button" type="button" onClick={handleLogout}>
+          <LogOut size={18} /> Выйти
+        </button>
+      </aside>
+
+      <main className="workspace">
+        <header className="topbar">
+          <div>
+            <h1>Оперативный журнал</h1>
+            <p>Фиксация дефектов, назначение ответственных организаций и контроль закрытия.</p>
+          </div>
+          <div className="topbar-actions">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setTheme((value) => (value === "light" ? "dark" : "light"))}
+              title={theme === "light" ? "Темная тема" : "Светлая тема"}
+            >
+              {theme === "light" ? <Moon size={19} /> : <Sun size={19} />}
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setInverted((value) => !value)}
+              title="Инвертировать интерфейс"
+            >
+              <FlipHorizontal size={19} />
+            </button>
+            <button className="icon-button" type="button" onClick={refreshWorkplace} title="Обновить">
+              <RefreshCw size={19} className={loading ? "spin" : ""} />
+            </button>
+          </div>
+        </header>
+
+        {message && (
+          <div className="notice">
+            <AlertTriangle size={18} />
+            <span>{message}</span>
+            <button type="button" onClick={() => setMessage("")} title="Закрыть">
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
+        {activeView === "approvals" ? (
+          <PendingUsersView
+            users={pendingUsers}
+            branches={branches}
+            currentUser={user}
+            onChanged={async () => {
+              const loadedPendingUsers = await api.pendingUsers();
+              setPendingUsers(loadedPendingUsers);
+              cacheUsers(loadedPendingUsers);
+            }}
+            onError={setMessage}
+          />
+        ) : (
+          <>
+        <section className="content-grid">
+          <div className="journal-panel">
+            <div className="toolbar">
+              <div className="search">
+                <Search size={18} />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по номеру, объекту, описанию" />
+              </div>
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as RemarkStatus | "")}>
+                {statuses.map((status) => (
+                  <option key={status || "all"} value={status}>
+                    {status ? statusLabel[status] : "Все статусы"}
+                  </option>
+                ))}
+              </select>
+              {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
+                <select
+                  value={branchFilter}
+                  onChange={(event) => setBranchFilter(event.target.value)}
+                >
+                  <option value="">Все филиалы</option>
+                  {branches.map((branch) => (
+                    <option key={branch.id} value={branch.id}>
+                      {branch.code} · {branch.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
+              <div className="table-section">
+                <h2>Замечания моего филиала</h2>
+                <RemarkTable
+                  remarks={ownBranchRemarks}
+                  branches={branches}
+                  usersById={usersById}
+                  selectedId={selectedRemark?.id}
+                  onSelect={setSelectedId}
+                />
+              </div>
+            )}
+
+            <div className="table-section">
+              <h2>{hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? "Сводный журнал" : "Замечания"}</h2>
+              <RemarkTable
+                remarks={visibleRemarks}
+                branches={branches}
+                usersById={usersById}
+                selectedId={selectedRemark?.id}
+                onSelect={(id) => {
+                  const remark = visibleRemarks.find((item) => item.id === id);
+                  if (hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && remark?.branchId !== user.branchId) {
+                    setSelectedId(null);
+                    setMessage("Замечание другого филиала доступно только в сводной таблице без назначения ответственной организации.");
+                    return;
+                  }
+                  setSelectedId(id);
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="detail-stack">
+            {hasRole(user, ["ADMIN", "BRANCH_HEAD", "APPLICANT"]) && (
+              <CreateRemarkForm
+                onCreated={(remark) => {
+                  replaceRemark(remark);
+                  void refreshWorkplace();
+                }}
+                onError={setMessage}
+              />
+            )}
+
+            <RemarkDetails
+              user={user}
+              remark={detailRemark}
+              branches={branches}
+              masters={masters}
+              usersById={usersById}
+              onUpdated={replaceRemark}
+              onNeedMasters={async (branchId) => {
+                const loadedMasters = await api.usersByRole(branchId, "MASTER");
+                setMasters(loadedMasters);
+                cacheUsers(loadedMasters);
+              }}
+              onNeedUser={ensureUserLoaded}
+              onError={setMessage}
+            />
+          </div>
+        </section>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function AuthScreen({
+  branches,
+  branchesLoading,
+  mode,
+  message,
+  onModeChange,
+  onMessage,
+  onReloadBranches,
+  onLogin,
+}: {
+  branches: Branch[];
+  branchesLoading: boolean;
+  mode: "login" | "register";
+  message: string;
+  onModeChange: (mode: "login" | "register") => void;
+  onMessage: (message: string) => void;
+  onReloadBranches: () => Promise<void>;
+  onLogin: (user: UserInfo) => void;
+}) {
+  return (
+    <div className="auth-layout">
+      <section className="auth-info">
+        <div className="brand auth-brand">
+          <ClipboardList size={30} />
+          <div>
+            <strong>Журнал замечаний</strong>
+            <span>Учет дефектов и поломок</span>
+          </div>
+        </div>
+        <h1>Единое рабочее место для контроля производственных замечаний</h1>
+        <div className="auth-stats">
+          <span>NEW</span>
+          <span>ASSIGNED</span>
+          <span>IN_PROGRESS</span>
+          <span>RESOLVED</span>
+          <span>CLOSED</span>
+        </div>
+      </section>
+
+      <section className="auth-card">
+        <div className="tabs">
+          <button className={mode === "login" ? "active" : ""} onClick={() => onModeChange("login")} type="button">
+            Вход
+          </button>
+          <button className={mode === "register" ? "active" : ""} onClick={() => onModeChange("register")} type="button">
+            Регистрация
+          </button>
+        </div>
+        {message && <div className="form-message">{message}</div>}
+        {mode === "login" ? (
+          <LoginForm onLogin={onLogin} onError={onMessage} />
+        ) : (
+          <RegisterForm
+            branches={branches}
+            branchesLoading={branchesLoading}
+            onReloadBranches={onReloadBranches}
+            onDone={() => onModeChange("login")}
+            onMessage={onMessage}
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function LoginForm({ onLogin, onError }: { onLogin: (user: UserInfo) => void; onError: (message: string) => void }) {
+  const [email, setEmail] = useState("admin-1212@remark.local");
+  const [password, setPassword] = useState("Admin123!");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      const response = await api.login(email, password);
+      onLogin(response.user);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось войти");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="form" onSubmit={submit}>
+      <label>
+        Email
+        <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
+      </label>
+      <label>
+        Пароль
+        <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required />
+      </label>
+      <button className="primary-button" disabled={busy} type="submit">
+        <ShieldCheck size={18} /> Войти
+      </button>
+    </form>
+  );
+}
+
+function RegisterForm({
+  branches,
+  branchesLoading,
+  onReloadBranches,
+  onDone,
+  onMessage,
+}: {
+  branches: Branch[];
+  branchesLoading: boolean;
+  onReloadBranches: () => Promise<void>;
+  onDone: () => void;
+  onMessage: (message: string) => void;
+}) {
+  const [form, setForm] = useState<RegisterPayload>({
+    email: "",
+    password: "",
+    fullName: "",
+    position: "",
+    branchId: branches[0]?.id ?? "",
+    requestedRole: "APPLICANT",
+  });
+
+  useEffect(() => {
+    if ((!form.branchId || !branches.some((branch) => branch.id === form.branchId)) && branches[0]?.id) {
+      setForm((value) => ({ ...value, branchId: branches[0].id }));
+    }
+  }, [branches, form.branchId]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!form.branchId) {
+      onMessage("Выберите филиал. Если список пустой, обновите справочник филиалов.");
+      return;
+    }
+    try {
+      await api.register(form);
+      onMessage("Заявка создана. Дождитесь подтверждения администратора или ответственного.");
+      onDone();
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Не удалось зарегистрироваться");
+    }
+  }
+
+  const branchesUnavailable = branchesLoading || branches.length === 0;
+
+  return (
+    <form className="form" onSubmit={submit}>
+      <label>
+        ФИО
+        <input value={form.fullName} onChange={(event) => setForm({ ...form, fullName: event.target.value })} required />
+      </label>
+      <label>
+        Должность
+        <input value={form.position} onChange={(event) => setForm({ ...form, position: event.target.value })} required />
+      </label>
+      <label>
+        Email
+        <input value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} type="email" required />
+      </label>
+      <label>
+        Пароль
+        <input value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} type="password" minLength={8} required />
+      </label>
+      <label>
+        Филиал
+        <select
+          value={form.branchId}
+          onChange={(event) => setForm({ ...form, branchId: event.target.value })}
+          disabled={branchesUnavailable}
+          required
+        >
+          <option value="">
+            {branchesLoading ? "Загрузка филиалов..." : branches.length ? "Выберите филиал" : "Филиалы не загружены"}
+          </option>
+          {branches.map((branch) => (
+            <option key={branch.id} value={branch.id}>
+              {branch.code} · {branch.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      {branches.length === 0 && (
+        <div className="form-hint">
+          <span>Список должен прийти из `/api/v1/refs/branches` после применения `changelog-seed-branches.xml`.</span>
+          <button className="secondary-button" type="button" onClick={onReloadBranches} disabled={branchesLoading}>
+            <RefreshCw size={16} className={branchesLoading ? "spin" : ""} /> Обновить филиалы
+          </button>
+        </div>
+      )}
+      <label>
+        Роль
+        <select value={form.requestedRole} onChange={(event) => setForm({ ...form, requestedRole: event.target.value as RoleCode })}>
+          {roleOptions.map((role) => (
+            <option key={role} value={role}>
+              {roleLabel[role]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button className="primary-button" type="submit" disabled={branchesUnavailable}>
+        <Send size={18} /> Отправить заявку
+      </button>
+    </form>
+  );
+}
+
+function RemarkTable({
+  remarks,
+  branches,
+  usersById,
+  selectedId,
+  onSelect,
+}: {
+  remarks: Remark[];
+  branches: Branch[];
+  usersById: Record<string, User | UserInfo>;
+  selectedId?: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Номер</th>
+            <th>Объект</th>
+            <th>Филиал</th>
+            <th>Кто сообщил</th>
+            <th>Обнаружено</th>
+            <th>Дата устранения</th>
+            <th>Организация, ответственная за устранение</th>
+            <th>Отчет об устранении</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody>
+          {remarks.map((remark) => (
+            <tr key={remark.id} className={selectedId === remark.id ? "selected" : ""} onClick={() => onSelect(remark.id)}>
+              <td>{remark.remarkNumber}</td>
+              <td>
+                <strong>{remark.objectBuilding}</strong>
+                <span>{remark.description}</span>
+              </td>
+              <td>{branchName(branches, remark.branchId)}</td>
+              <td>{userName(usersById, remark.createdByUserId)}</td>
+              <td>{formatDate(remark.discoveredAt)}</td>
+              <td>{formatDate(remark.resolvedAt)}</td>
+              <td>{remark.assignedMasterId ? userName(usersById, remark.assignedMasterId) : "Не назначена"}</td>
+              <td>
+                <label className="report-check">
+                  <input type="checkbox" checked={Boolean(remark.reportSentAt)} readOnly />
+                  <span>{remark.reportSentAt ? "Отправлен" : "Не отправлен"}</span>
+                </label>
+              </td>
+              <td>
+                <StatusBadge status={remark.status} />
+              </td>
+            </tr>
+          ))}
+          {!remarks.length && (
+            <tr>
+              <td colSpan={9} className="empty-cell">
+                Записей нет
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: RemarkStatus }) {
+  return <span className={`status ${statusClass[status]}`}>{statusLabel[status]}</span>;
+}
+
+function CreateRemarkForm({ onCreated, onError }: { onCreated: (remark: Remark) => void; onError: (message: string) => void }) {
+  const [form, setForm] = useState<CreateRemarkPayload>({
+    objectBuilding: "",
+    description: "",
+    discoveredAt: today(),
+  });
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const remark = await api.createRemark(form);
+      onCreated(remark);
+      setForm({ objectBuilding: "", description: "", discoveredAt: today() });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось создать замечание");
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <h2>Новое замечание</h2>
+        <Plus size={18} />
+      </div>
+      <form className="form compact" onSubmit={submit}>
+        <label>
+          Объект, здание, участок
+          <input value={form.objectBuilding} onChange={(event) => setForm({ ...form, objectBuilding: event.target.value })} maxLength={500} required />
+        </label>
+        <label>
+          Дата обнаружения
+          <input value={form.discoveredAt} onChange={(event) => setForm({ ...form, discoveredAt: event.target.value })} type="date" required />
+        </label>
+        <label>
+          Описание дефекта
+          <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} rows={4} required />
+        </label>
+        <button className="primary-button" type="submit">
+          <Plus size={18} /> Создать
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function RemarkDetails({
+  user,
+  remark,
+  branches,
+  masters,
+  usersById,
+  onUpdated,
+  onNeedMasters,
+  onNeedUser,
+  onError,
+}: {
+  user: UserInfo;
+  remark: Remark | null;
+  branches: Branch[];
+  masters: User[];
+  usersById: Record<string, User | UserInfo>;
+  onUpdated: (remark: Remark) => void;
+  onNeedMasters: (branchId: string) => Promise<void>;
+  onNeedUser: (id?: string | null) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [masterId, setMasterId] = useState("");
+  const [resolution, setResolution] = useState("");
+
+  useEffect(() => {
+    if (
+      remark &&
+      hasRole(user, ["ADMIN", "BRANCH_HEAD"]) &&
+      remark.branchId === user.branchId &&
+      remark.status === "NEW" &&
+      !remark.assignedMasterId &&
+      !remark.resolvedAt &&
+      !remark.closedAt &&
+      !remark.reportSentAt
+    ) {
+      void onNeedMasters(remark.branchId);
+    }
+  }, [remark?.id]);
+
+  useEffect(() => {
+    void onNeedUser(remark?.assignedMasterId);
+    void onNeedUser(remark?.createdByUserId);
+  }, [remark?.assignedMasterId, remark?.createdByUserId]);
+
+  if (!remark) {
+    return (
+      <section className="panel">
+        <div className="empty-state">
+          {hasRole(user, ["ADMIN", "BRANCH_HEAD"])
+            ? "Выберите активное неназначенное замечание своего филиала"
+            : "Выберите замечание в журнале"}
+        </div>
+      </section>
+    );
+  }
+
+  async function run(action: () => Promise<Remark>, fallback: string) {
+    try {
+      onUpdated(await action());
+      setResolution("");
+      setMasterId("");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : fallback);
+    }
+  }
+
+  const canManageRemark = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && remark.branchId === user.branchId;
+  const canAssign =
+    canManageRemark &&
+    remark.status === "NEW" &&
+    !remark.assignedMasterId &&
+    !remark.resolvedAt &&
+    !remark.closedAt &&
+    !remark.reportSentAt;
+  const canStart = hasRole(user, ["MASTER"]) && remark.status === "ASSIGNED" && remark.assignedMasterId === user.userId;
+  const canResolve = hasRole(user, ["MASTER"]) && remark.status === "IN_PROGRESS" && remark.assignedMasterId === user.userId;
+  const canClose = canManageRemark && remark.status === "RESOLVED";
+  const hasActions = canAssign || canStart || canResolve || canClose;
+  const assignedMaster = remark.assignedMasterId ? usersById[remark.assignedMasterId] : null;
+  const reporter = usersById[remark.createdByUserId];
+
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <div>
+          <h2>{remark.remarkNumber}</h2>
+          <span>{branchName(branches, remark.branchId)}</span>
+        </div>
+        <StatusBadge status={remark.status} />
+      </div>
+
+      <dl className="details">
+        <div>
+          <dt>Объект</dt>
+          <dd>{remark.objectBuilding}</dd>
+        </div>
+        <div>
+          <dt>Описание</dt>
+          <dd>{remark.description}</dd>
+        </div>
+        <div>
+          <dt>Обнаружено</dt>
+          <dd>{formatDate(remark.discoveredAt)}</dd>
+        </div>
+        <div>
+          <dt>Создано</dt>
+          <dd>{formatDateTime(remark.createdAt)}</dd>
+        </div>
+        <div>
+          <dt>Кто сообщил</dt>
+          <dd>{reporter?.fullName ?? remark.createdByUserId}</dd>
+        </div>
+        <div>
+          <dt>Дата устранения</dt>
+          <dd>{formatDateTime(remark.resolvedAt)}</dd>
+        </div>
+        <div>
+          <dt>Организация, ответственная за устранение</dt>
+          <dd>{assignedMaster?.fullName ?? masters.find((master) => master.id === remark.assignedMasterId)?.fullName ?? remark.assignedMasterId ?? "Не назначена"}</dd>
+        </div>
+        <div>
+          <dt>Отчет об устранении</dt>
+          <dd>
+            <label className="report-check">
+              <input type="checkbox" checked={Boolean(remark.reportSentAt)} readOnly />
+              <span>{remark.reportSentAt ? `Отправлен, ${formatDateTime(remark.reportSentAt)}` : "Не отправлен"}</span>
+            </label>
+          </dd>
+        </div>
+      </dl>
+
+      {remark.resolutionMessage && (
+        <div className="resolution">
+          <strong>Результат устранения</strong>
+          <p>{remark.resolutionMessage}</p>
+        </div>
+      )}
+
+      {hasActions && <div className="actions">
+        {canAssign && (
+          <form
+            className="inline-action"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(() => api.assignMaster(remark.id, masterId), "Не удалось назначить ответственную организацию");
+            }}
+          >
+            <select value={masterId} onChange={(event) => setMasterId(event.target.value)} required>
+              <option value="">Выберите организацию</option>
+              {masters.map((master) => (
+                <option key={master.id} value={master.id}>
+                  {master.fullName} · {master.position}
+                </option>
+              ))}
+            </select>
+            <button className="primary-button" type="submit">
+              <UserCheck size={18} /> Назначить
+            </button>
+          </form>
+        )}
+
+        {canStart && (
+          <button className="primary-button" type="button" onClick={() => run(() => api.startWork(remark.id), "Не удалось взять в работу")}>
+            <Play size={18} /> В работу
+          </button>
+        )}
+
+        {canResolve && (
+          <form
+            className="form compact"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(() => api.resolve(remark.id, resolution), "Не удалось отметить устранение");
+            }}
+          >
+            <label>
+              Сообщение об устранении
+              <textarea value={resolution} onChange={(event) => setResolution(event.target.value)} rows={3} required />
+            </label>
+            <button className="primary-button" type="submit">
+              <Check size={18} /> Устранено
+            </button>
+          </form>
+        )}
+
+        {canClose && (
+          <button className="primary-button" type="button" onClick={() => run(() => api.close(remark.id), "Не удалось закрыть замечание")}>
+            <Check size={18} /> Закрыть
+          </button>
+        )}
+      </div>}
+    </section>
+  );
+}
+
+function PendingUsers({
+  title = "Заявки пользователей",
+  users,
+  branches,
+  onChanged,
+  onError,
+}: {
+  title?: string;
+  users: User[];
+  branches: Branch[];
+  onChanged: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  async function decide(action: () => Promise<User>) {
+    try {
+      await action();
+      await onChanged();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось обработать заявку");
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <h2>{title}</h2>
+        <span className="counter">{users.length}</span>
+      </div>
+      <div className="pending-list">
+        {users.map((item) => (
+          <article key={item.id} className="pending-item">
+            <div>
+              <strong>{item.fullName}</strong>
+              <span>{item.email}</span>
+              <small>
+                {roleLabel[item.roles[0]] ?? "Роль"} · {branchName(branches, item.branchId)}
+              </small>
+            </div>
+            <div className="decision-buttons">
+              <button type="button" onClick={() => decide(() => api.approveUser(item.id))} title="Одобрить">
+                <Check size={17} />
+              </button>
+              <button type="button" onClick={() => decide(() => api.rejectUser(item.id))} title="Отклонить">
+                <X size={17} />
+              </button>
+            </div>
+          </article>
+        ))}
+        {!users.length && <div className="empty-state small">Нет заявок на согласование</div>}
+      </div>
+    </section>
+  );
+}
+
+function PendingUsersView({
+  users,
+  branches,
+  currentUser,
+  onChanged,
+  onError,
+}: {
+  users: User[];
+  branches: Branch[];
+  currentUser: UserInfo;
+  onChanged: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const ownBranchUsers = users.filter((item) => item.branchId === currentUser.branchId);
+
+  return (
+    <section className="approval-view">
+      <PendingUsers
+        title="Заявки моего филиала"
+        users={ownBranchUsers}
+        branches={branches}
+        onChanged={onChanged}
+        onError={onError}
+      />
+    </section>
+  );
+}
