@@ -59,7 +59,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr);
   min-height: 100vh;
   color: var(--text);
   background: var(--page-bg);
@@ -96,7 +96,7 @@ button {
 }
 
 .app-shell.inverted {
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width, 280px);
 }
 
 .app-shell.inverted .sidebar {
@@ -110,6 +110,7 @@ button {
 }
 
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -124,6 +125,51 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  padding: 0;
+  cursor: col-resize;
+  background: transparent;
+  border: 0;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 4px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+.sidebar-resizer:hover::after,
+.resizing-sidebar .sidebar-resizer::after {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.app-shell.inverted .sidebar-resizer {
+  right: auto;
+  left: -5px;
+}
+
+.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .brand strong,
@@ -159,6 +205,19 @@ button {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
+}
+
+.app-shell .profile {
+  align-items: flex-start;
+}
+
+.app-shell .profile strong {
+  font-size: 18px;
+}
+
+.app-shell .profile span {
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .avatar {
@@ -292,6 +351,19 @@ dl {
   align-items: start;
 }
 
+.app-shell.inverted .content-grid {
+  grid-template-columns: minmax(340px, 0.8fr) minmax(0, 1.55fr);
+}
+
+.app-shell.inverted .journal-panel {
+  grid-column: 2;
+}
+
+.app-shell.inverted .detail-stack {
+  grid-column: 1;
+  grid-row: 1;
+}
+
 .journal-panel,
 .panel,
 .auth-card {
@@ -303,6 +375,15 @@ dl {
 .journal-panel {
   min-width: 0;
   overflow: hidden;
+}
+
+.summary-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.own-journal-panel .table-section + .table-section {
+  display: none;
 }
 
 .table-section {
@@ -325,6 +406,10 @@ dl {
   gap: 10px;
   padding: 14px;
   border-bottom: 1px solid var(--line);
+}
+
+.own-journal-panel .toolbar {
+  grid-template-columns: minmax(220px, 1fr) 170px;
 }
 
 .search {
@@ -683,6 +768,61 @@ label {
 .pending-item small {
   color: var(--muted);
   margin-top: 2px;
+}
+
+.notification-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: var(--soft-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.notification-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.notification-summary strong,
+.notification-summary span,
+.notification-summary small {
+  display: block;
+}
+
+.notification-summary small {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.notification-summary > span {
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.notification-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.notification-body iframe {
+  width: 100%;
+  height: min(70vh, 720px);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
 }
 
 .decision-buttons {

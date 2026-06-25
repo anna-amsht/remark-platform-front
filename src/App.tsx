@@ -1,8 +1,12 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   AlertTriangle,
+  BarChart3,
+  Bell,
   Check,
   ClipboardList,
+  Download,
   FlipHorizontal,
   LogOut,
   Moon,
@@ -14,14 +18,17 @@ import {
   ShieldCheck,
   Sun,
   UserCheck,
+  UserMinus,
+  Users,
   X,
 } from "lucide-react";
 import { api, session } from "./api";
-import type { Branch, CreateRemarkPayload, RegisterPayload, Remark, RemarkStatus, RoleCode, User, UserInfo } from "./types";
+import type { Branch, CreateRemarkPayload, RegisterPayload, ReportNotification, Remark, RemarkStatus, RoleCode, User, UserInfo } from "./types";
 
 const statuses: Array<RemarkStatus | ""> = ["", "NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"];
 const roleOptions: RoleCode[] = ["APPLICANT", "MASTER", "BRANCH_HEAD"];
-type View = "remarks" | "approvals";
+type View = "remarks" | "summary" | "notifications" | "employees";
+type EmployeeTab = "pending" | "employees";
 type Theme = "light" | "dark";
 
 const statusLabel: Record<RemarkStatus, string> = {
@@ -67,6 +74,51 @@ function formatDateTime(value?: string | null) {
   }).format(new Date(value));
 }
 
+function formatEstimatedResolution(remark: Remark) {
+  if (remark.resolvedAt) {
+    return { title: formatDateTime(remark.resolvedAt), subtitle: "" };
+  }
+  if (remark.status === "CLOSED") {
+    return { title: formatDateTime(remark.closedAt), subtitle: "" };
+  }
+  if (!remark.estimatedResolutionAt) {
+    return { title: "Не указано", subtitle: "" };
+  }
+
+  const discovered = new Date(`${remark.discoveredAt}T00:00:00`);
+  const estimatedAt = new Date(remark.estimatedResolutionAt);
+  const hours = Math.max(1, Math.ceil((estimatedAt.getTime() - discovered.getTime()) / 3_600_000));
+  const days = Math.max(1, Math.ceil(hours / 24));
+
+  return {
+    title: `${days} дн. (${hours} ч.)`,
+    subtitle: remark.estimatedResolutionAt ? `до ${formatDateTime(remark.estimatedResolutionAt)}` : "",
+  };
+}
+
+function toDateTimeLocalValue(value?: string | null) {
+  if (!value) return "";
+  return value.slice(0, 16);
+}
+
+function readReportsKey(userId: string) {
+  return `remark.readReports.${userId}`;
+}
+
+function readStoredReadReportIds(userId: string) {
+  const raw = localStorage.getItem(readReportsKey(userId));
+  if (!raw) return new Set<string>();
+  try {
+    return new Set(JSON.parse(raw) as string[]);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function storeReadReportIds(userId: string, ids: Set<string>) {
+  localStorage.setItem(readReportsKey(userId), JSON.stringify(Array.from(ids)));
+}
+
 function hasRole(user: UserInfo | null, roles: RoleCode[]) {
   return Boolean(user?.roles.some((role) => roles.includes(role)));
 }
@@ -81,6 +133,11 @@ function userName(usersById: Record<string, User | UserInfo>, id?: string | null
   return usersById[id]?.fullName ?? id;
 }
 
+function userEmail(usersById: Record<string, User | UserInfo>, id?: string | null) {
+  if (!id) return "";
+  return usersById[id]?.email ?? "";
+}
+
 export function App() {
   const [user, setUser] = useState<UserInfo | null>(session.user);
   const [activeView, setActiveView] = useState<View>("remarks");
@@ -88,6 +145,10 @@ export function App() {
   const [remarks, setRemarks] = useState<Remark[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
+  const [managedUsers, setManagedUsers] = useState<User[]>([]);
+  const [reports, setReports] = useState<ReportNotification[]>([]);
+  const [readReportIds, setReadReportIds] = useState<Set<string>>(() => new Set());
+  const [employeeTab, setEmployeeTab] = useState<EmployeeTab>("pending");
   const [masters, setMasters] = useState<User[]>([]);
   const [usersById, setUsersById] = useState<Record<string, User | UserInfo>>({});
   const [statusFilter, setStatusFilter] = useState<RemarkStatus | "">("");
@@ -99,6 +160,10 @@ export function App() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("remark.theme") as Theme | null) ?? "light");
   const [inverted, setInverted] = useState(() => localStorage.getItem("remark.inverted") === "true");
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const stored = Number(localStorage.getItem("remark.sidebarWidth"));
+    return Number.isFinite(stored) && stored >= 240 && stored <= 520 ? stored : 280;
+  });
 
   const selectedRemark = useMemo(
     () => remarks.find((remark) => remark.id === selectedId) ?? null,
@@ -136,6 +201,11 @@ export function App() {
     return selectedRemark;
   }, [selectedRemark, user]);
 
+  const unreadReportCount = useMemo(
+    () => reports.filter((report) => !readReportIds.has(report.id)).length,
+    [readReportIds, reports],
+  );
+
   useEffect(() => {
     void loadBranches(false);
   }, []);
@@ -149,14 +219,43 @@ export function App() {
   }, [inverted]);
 
   useEffect(() => {
+    localStorage.setItem("remark.sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  function startSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const direction = inverted ? -1 : 1;
+
+    function move(moveEvent: PointerEvent) {
+      const nextWidth = Math.min(520, Math.max(240, startWidth + (moveEvent.clientX - startX) * direction));
+      setSidebarWidth(nextWidth);
+    }
+
+    function stop() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      document.body.classList.remove("resizing-sidebar");
+    }
+
+    document.body.classList.add("resizing-sidebar");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  }
+
+  useEffect(() => {
     if (user) {
       setSelectedId(null);
       setMasters([]);
       setPendingUsers([]);
+      setManagedUsers([]);
+      setReports([]);
       setUsersById({});
       setStatusFilter("");
       setBranchFilter("");
       cacheUsers([user]);
+      setReadReportIds(readStoredReadReportIds(user.userId));
       void refreshWorkplace();
     }
   }, [user]);
@@ -165,7 +264,7 @@ export function App() {
     if (user) {
       void refreshWorkplace();
     }
-  }, [statusFilter, branchFilter]);
+  }, [statusFilter, branchFilter, activeView]);
 
   useEffect(() => {
     if (!user || hasRole(user, ["ADMIN", "BRANCH_HEAD"])) return;
@@ -204,7 +303,7 @@ export function App() {
     setLoading(true);
     setMessage("");
     try {
-      const branchId = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? branchFilter || undefined : undefined;
+      const branchId = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && activeView === "summary" ? branchFilter || undefined : undefined;
       const data = await api.remarks(statusFilter || undefined, branchId);
       const preferredRemark = hasRole(user, ["ADMIN", "BRANCH_HEAD"])
         ? data.find((item) => item.branchId === user?.branchId) ?? data[0]
@@ -222,6 +321,12 @@ export function App() {
         const loadedPendingUsers = await api.pendingUsers();
         setPendingUsers(loadedPendingUsers);
         cacheUsers(loadedPendingUsers);
+        const loadedManagedUsers = await api.managedUsers();
+        setManagedUsers(loadedManagedUsers);
+        cacheUsers(loadedManagedUsers);
+      }
+      if (hasRole(user, ["ADMIN", "BRANCH_HEAD", "APPLICANT"])) {
+        setReports(await api.reports());
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Не удалось обновить журнал");
@@ -235,6 +340,9 @@ export function App() {
     setUser(null);
     setRemarks([]);
     setPendingUsers([]);
+    setManagedUsers([]);
+    setReports([]);
+    setReadReportIds(new Set());
     setMasters([]);
     setUsersById({});
     setActiveView("remarks");
@@ -293,13 +401,18 @@ export function App() {
   }
 
   return (
-    <div className={`app-shell theme-${theme}${inverted ? " inverted" : ""}`}>
+    <div
+      className={`app-shell theme-${theme}${inverted ? " inverted" : ""}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <aside className="sidebar">
-        <div className="brand">
-          <ClipboardList size={28} />
-          <div>
-            <strong>Журнал замечаний</strong>
-            <span>Производственный контур</span>
+        <div className="sidebar-head">
+          <div className="brand">
+            <ClipboardList size={28} />
+            <div>
+              <strong>Журнал замечаний</strong>
+              <span>Производственный контур</span>
+            </div>
           </div>
         </div>
 
@@ -316,8 +429,19 @@ export function App() {
             <ClipboardList size={18} /> Замечания
           </button>
           {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
-            <button className={activeView === "approvals" ? "active" : ""} type="button" onClick={() => setActiveView("approvals")}>
-              <UserCheck size={18} /> Согласование
+            <button className={activeView === "summary" ? "active" : ""} type="button" onClick={() => setActiveView("summary")}>
+              <BarChart3 size={18} /> Сводная таблица
+            </button>
+          )}
+          {hasRole(user, ["ADMIN", "BRANCH_HEAD", "APPLICANT"]) && (
+            <button className={activeView === "notifications" ? "active" : ""} type="button" onClick={() => setActiveView("notifications")}>
+              <Bell size={18} /> Оповещения
+              <span>{unreadReportCount}</span>
+            </button>
+          )}
+          {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
+            <button className={activeView === "employees" ? "active" : ""} type="button" onClick={() => setActiveView("employees")}>
+              <Users size={18} /> Управление сотрудниками
               <span>{pendingUsers.length}</span>
             </button>
           )}
@@ -331,6 +455,13 @@ export function App() {
         <button className="ghost-button" type="button" onClick={handleLogout}>
           <LogOut size={18} /> Выйти
         </button>
+        <button
+          className="sidebar-resizer"
+          type="button"
+          onPointerDown={startSidebarResize}
+          aria-label="Изменить ширину панели"
+          title="Потяните, чтобы изменить ширину панели"
+        />
       </aside>
 
       <main className="workspace">
@@ -372,22 +503,72 @@ export function App() {
           </div>
         )}
 
-        {activeView === "approvals" ? (
-          <PendingUsersView
-            users={pendingUsers}
+        {activeView === "notifications" && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? (
+          <ReportsView
+            reports={reports}
+            readReportIds={readReportIds}
+            currentUser={user}
+            onRead={setReadReportIds}
+            onError={setMessage}
+          />
+        ) : activeView === "employees" && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? (
+          <EmployeeManagementView
+            pendingUsers={pendingUsers}
+            managedUsers={managedUsers}
             branches={branches}
             currentUser={user}
+            activeTab={employeeTab}
+            onTabChange={setEmployeeTab}
             onChanged={async () => {
               const loadedPendingUsers = await api.pendingUsers();
               setPendingUsers(loadedPendingUsers);
               cacheUsers(loadedPendingUsers);
+              const loadedManagedUsers = await api.managedUsers();
+              setManagedUsers(loadedManagedUsers);
+              cacheUsers(loadedManagedUsers);
             }}
             onError={setMessage}
           />
+        ) : activeView === "summary" && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? (
+          <section className="summary-view">
+            <div className="journal-panel">
+              <div className="toolbar">
+                <div className="search">
+                  <Search size={18} />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по номеру, объекту, описанию" />
+                </div>
+                <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as RemarkStatus | "")}>
+                  {statuses.map((status) => (
+                    <option key={status || "all"} value={status}>
+                      {status ? statusLabel[status] : "Все статусы"}
+                    </option>
+                  ))}
+                </select>
+                <select value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)}>
+                  <option value="">Все филиалы</option>
+                  {branches.map((branch) => (
+                    <option key={branch.id} value={branch.id}>
+                      {branch.code} В· {branch.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="table-section">
+                <h2>Сводная таблица</h2>
+                <RemarkTable
+                  remarks={visibleRemarks}
+                  branches={branches}
+                  usersById={usersById}
+                  selectedId={selectedRemark?.id}
+                  onSelect={setSelectedId}
+                />
+              </div>
+            </div>
+          </section>
         ) : (
           <>
         <section className="content-grid">
-          <div className="journal-panel">
+          <div className="journal-panel own-journal-panel">
             <div className="toolbar">
               <div className="search">
                 <Search size={18} />
@@ -400,7 +581,7 @@ export function App() {
                   </option>
                 ))}
               </select>
-              {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
+              {false && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
                 <select
                   value={branchFilter}
                   onChange={(event) => setBranchFilter(event.target.value)}
@@ -417,7 +598,7 @@ export function App() {
 
             {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
               <div className="table-section">
-                <h2>Замечания моего филиала</h2>
+                <h2>Записи филиала</h2>
                 <RemarkTable
                   remarks={ownBranchRemarks}
                   branches={branches}
@@ -728,9 +909,22 @@ function RemarkTable({
                 <span>{remark.description}</span>
               </td>
               <td>{branchName(branches, remark.branchId)}</td>
-              <td>{userName(usersById, remark.createdByUserId)}</td>
+              <td>
+                <strong>{userName(usersById, remark.createdByUserId)}</strong>
+                {userEmail(usersById, remark.createdByUserId) && <span>{userEmail(usersById, remark.createdByUserId)}</span>}
+              </td>
               <td>{formatDate(remark.discoveredAt)}</td>
-              <td>{formatDate(remark.resolvedAt)}</td>
+              <td>
+                {(() => {
+                  const estimated = formatEstimatedResolution(remark);
+                  return (
+                    <>
+                      <strong>{estimated.title}</strong>
+                      {estimated.subtitle && <span>{estimated.subtitle}</span>}
+                    </>
+                  );
+                })()}
+              </td>
               <td>{remark.assignedMasterId ? userName(usersById, remark.assignedMasterId) : "Не назначена"}</td>
               <td>
                 <label className="report-check">
@@ -828,6 +1022,7 @@ function RemarkDetails({
 }) {
   const [masterId, setMasterId] = useState("");
   const [resolution, setResolution] = useState("");
+  const [estimatedResolutionAt, setEstimatedResolutionAt] = useState("");
 
   useEffect(() => {
     if (
@@ -848,6 +1043,10 @@ function RemarkDetails({
     void onNeedUser(remark?.assignedMasterId);
     void onNeedUser(remark?.createdByUserId);
   }, [remark?.assignedMasterId, remark?.createdByUserId]);
+
+  useEffect(() => {
+    setEstimatedResolutionAt(toDateTimeLocalValue(remark?.estimatedResolutionAt));
+  }, [remark?.id, remark?.estimatedResolutionAt]);
 
   if (!remark) {
     return (
@@ -881,10 +1080,15 @@ function RemarkDetails({
     !remark.reportSentAt;
   const canStart = hasRole(user, ["MASTER"]) && remark.status === "ASSIGNED" && remark.assignedMasterId === user.userId;
   const canResolve = hasRole(user, ["MASTER"]) && remark.status === "IN_PROGRESS" && remark.assignedMasterId === user.userId;
+  const canSetEstimatedResolution =
+    hasRole(user, ["MASTER"]) &&
+    remark.assignedMasterId === user.userId &&
+    (remark.status === "ASSIGNED" || remark.status === "IN_PROGRESS");
   const canClose = canManageRemark && remark.status === "RESOLVED";
-  const hasActions = canAssign || canStart || canResolve || canClose;
+  const hasActions = canAssign || canSetEstimatedResolution || canStart || canResolve || canClose;
   const assignedMaster = remark.assignedMasterId ? usersById[remark.assignedMasterId] : null;
   const reporter = usersById[remark.createdByUserId];
+  const estimated = formatEstimatedResolution(remark);
 
   return (
     <section className="panel">
@@ -919,7 +1123,10 @@ function RemarkDetails({
         </div>
         <div>
           <dt>Дата устранения</dt>
-          <dd>{formatDateTime(remark.resolvedAt)}</dd>
+          <dd>
+            {estimated.title}
+            {estimated.subtitle ? ` (${estimated.subtitle})` : ""}
+          </dd>
         </div>
         <div>
           <dt>Организация, ответственная за устранение</dt>
@@ -966,8 +1173,46 @@ function RemarkDetails({
           </form>
         )}
 
+        {canSetEstimatedResolution && (
+          <form
+            className="form compact"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(
+                () => api.setEstimatedResolution(remark.id, estimatedResolutionAt),
+                "Не удалось сохранить примерную дату устранения",
+              );
+            }}
+          >
+            <label>
+              Примерная дата устранения
+              <input
+                value={estimatedResolutionAt}
+                onChange={(event) => setEstimatedResolutionAt(event.target.value)}
+                type="datetime-local"
+                min={`${remark.discoveredAt}T00:01`}
+                required
+              />
+            </label>
+            <button className="secondary-button" type="submit">
+              <Check size={18} /> Сохранить срок
+            </button>
+          </form>
+        )}
+
         {canStart && (
-          <button className="primary-button" type="button" onClick={() => run(() => api.startWork(remark.id), "Не удалось взять в работу")}>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={!remark.estimatedResolutionAt}
+            onClick={() => {
+              if (!remark.estimatedResolutionAt) {
+                onError("Сначала укажите примерную дату устранения");
+                return;
+              }
+              void run(() => api.startWork(remark.id), "Не удалось взять в работу");
+            }}
+          >
             <Play size={18} /> В работу
           </button>
         )}
@@ -977,6 +1222,10 @@ function RemarkDetails({
             className="form compact"
             onSubmit={(event) => {
               event.preventDefault();
+              if (!remark.estimatedResolutionAt) {
+                onError("Сначала укажите примерную дату устранения");
+                return;
+              }
               void run(() => api.resolve(remark.id, resolution), "Не удалось отметить устранение");
             }}
           >
@@ -1054,7 +1303,170 @@ function PendingUsers({
   );
 }
 
-function PendingUsersView({
+function ReportsView({
+  reports,
+  readReportIds,
+  currentUser,
+  onRead,
+  onError,
+}: {
+  reports: ReportNotification[];
+  readReportIds: Set<string>;
+  currentUser: UserInfo;
+  onRead: (ids: Set<string>) => void;
+  onError: (message: string) => void;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+  const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
+
+  async function download(report: ReportNotification) {
+    try {
+      const { blob, fileName } = await api.downloadReport(report.id);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName || report.fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось скачать отчет");
+    }
+  }
+
+  async function toggleReport(report: ReportNotification) {
+    const nextExpandedId = expandedId === report.id ? null : report.id;
+    setExpandedId(nextExpandedId);
+
+    if (nextExpandedId === report.id && !readReportIds.has(report.id)) {
+      const nextReadIds = new Set(readReportIds);
+      nextReadIds.add(report.id);
+      storeReadReportIds(currentUser.userId, nextReadIds);
+      onRead(nextReadIds);
+    }
+
+    if (nextExpandedId === report.id && !previewUrls[report.id]) {
+      setLoadingPreviewId(report.id);
+      try {
+        const { blob } = await api.downloadReport(report.id);
+        setPreviewUrls((current) => ({
+          ...current,
+          [report.id]: URL.createObjectURL(blob),
+        }));
+      } catch (error) {
+        onError(error instanceof Error ? error.message : "Не удалось открыть отчет");
+      } finally {
+        setLoadingPreviewId(null);
+      }
+    }
+  }
+
+  const unreadCount = reports.filter((report) => !readReportIds.has(report.id)).length;
+
+  return (
+    <section className="approval-view">
+      <section className="panel">
+        <div className="panel-title">
+          <h2>Оповещения</h2>
+          <span className="counter">{unreadCount}</span>
+        </div>
+        <div className="pending-list">
+          {reports.map((report) => (
+            <article key={report.id} className="notification-item">
+              <button className="notification-summary" type="button" onClick={() => void toggleReport(report)}>
+                <div>
+                  <strong>Отчет по замечанию {report.remarkNumber}</strong>
+                  <span>{report.fileName}</span>
+                  <small>
+                    {formatDateTime(report.createdAt)}
+                    {readReportIds.has(report.id) ? " · прочитано" : " · новое"}
+                  </small>
+                </div>
+                <span>{expandedId === report.id ? "Свернуть" : "Раскрыть"}</span>
+              </button>
+              {expandedId === report.id && (
+                <div className="notification-body">
+                  {loadingPreviewId === report.id ? (
+                    <div className="empty-state small">Отчет загружается...</div>
+                  ) : previewUrls[report.id] ? (
+                    <iframe title={`Отчет ${report.remarkNumber}`} src={previewUrls[report.id]} />
+                  ) : (
+                    <div className="empty-state small">Не удалось открыть отчет</div>
+                  )}
+                  <button className="secondary-button" type="button" onClick={() => download(report)}>
+                    <Download size={17} /> Скачать PDF
+                  </button>
+                </div>
+              )}
+            </article>
+          ))}
+          {!reports.length && <div className="empty-state small">Отчетов об устранении пока нет</div>}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function EmployeeManagementView({
+  pendingUsers,
+  managedUsers,
+  branches,
+  currentUser,
+  activeTab,
+  onTabChange,
+  onChanged,
+  onError,
+}: {
+  pendingUsers: User[];
+  managedUsers: User[];
+  branches: Branch[];
+  currentUser: UserInfo;
+  activeTab: EmployeeTab;
+  onTabChange: (tab: EmployeeTab) => void;
+  onChanged: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const ownBranchUsers = pendingUsers.filter((item) => item.branchId === currentUser.branchId);
+
+  return (
+    <section className="approval-view">
+      <div className="management-tabs">
+        <div className="tabs section-tabs">
+          <button className={activeTab === "pending" ? "active" : ""} type="button" onClick={() => onTabChange("pending")}>
+            Согласование заявок
+          </button>
+          <button className={activeTab === "employees" ? "active" : ""} type="button" onClick={() => onTabChange("employees")}>
+            Список сотрудников
+          </button>
+        </div>
+      </div>
+      {activeTab === "pending" ? (
+        <PendingUsers
+          title="Заявки моего филиала"
+          users={ownBranchUsers}
+          branches={branches}
+          onChanged={onChanged}
+          onError={onError}
+        />
+      ) : (
+        <section className="panel">
+          <div className="panel-title">
+            <h2>Список сотрудников</h2>
+            <span className="counter">{managedUsers.length}</span>
+          </div>
+          <EmployeeList
+            users={managedUsers}
+            branches={branches}
+            currentUser={currentUser}
+            onChanged={onChanged}
+            onError={onError}
+          />
+        </section>
+      )}
+    </section>
+  );
+}
+function EmployeeList({
   users,
   branches,
   currentUser,
@@ -1067,17 +1479,44 @@ function PendingUsersView({
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
 }) {
-  const ownBranchUsers = users.filter((item) => item.branchId === currentUser.branchId);
+  async function dismiss(user: User) {
+    const role = user.roles[0];
+    const canDismiss =
+      (hasRole(currentUser, ["ADMIN"]) && (role === "MASTER" || role === "BRANCH_HEAD")) ||
+      (hasRole(currentUser, ["BRANCH_HEAD"]) && role === "MASTER");
+
+    if (!canDismiss) {
+      onError("Недостаточно прав для сокращения сотрудника");
+      return;
+    }
+
+    try {
+      await api.dismissUser(user.id);
+      await onChanged();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось сократить сотрудника");
+    }
+  }
 
   return (
-    <section className="approval-view">
-      <PendingUsers
-        title="Заявки моего филиала"
-        users={ownBranchUsers}
-        branches={branches}
-        onChanged={onChanged}
-        onError={onError}
-      />
-    </section>
+    <div className="pending-list">
+      {users.map((item) => (
+        <article key={item.id} className="pending-item">
+          <div>
+            <strong>{item.fullName}</strong>
+            <span>{item.email}</span>
+            <small>
+              {roleLabel[item.roles[0]] ?? "Роль"} · {branchName(branches, item.branchId)}
+            </small>
+          </div>
+          <div className="decision-buttons">
+            <button type="button" onClick={() => dismiss(item)} title="Сократить">
+              <UserMinus size={17} />
+            </button>
+          </div>
+        </article>
+      ))}
+      {!users.length && <div className="empty-state small">Сотрудников для управления нет</div>}
+    </div>
   );
 }

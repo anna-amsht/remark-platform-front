@@ -3,6 +3,7 @@ import type {
   CreateRemarkPayload,
   LoginResponse,
   RegisterPayload,
+  ReportNotification,
   Remark,
   RemarkStatus,
   RoleCode,
@@ -77,6 +78,29 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   return response.json() as Promise<T>;
+}
+
+async function requestBlob(path: string): Promise<{ blob: Blob; fileName: string }> {
+  const headers = new Headers();
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  }
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers,
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(await extractError(response));
+  }
+
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const fileNameMatch = disposition.match(/filename="?([^"]+)"?/);
+  return {
+    blob: await response.blob(),
+    fileName: fileNameMatch?.[1] ?? "report.pdf",
+  };
 }
 
 async function extractError(response: Response): Promise<string> {
@@ -156,6 +180,12 @@ export const api = {
   rejectUser(id: string) {
     return request<User>(`/api/v1/users/${id}/reject`, { method: "PATCH" });
   },
+  managedUsers() {
+    return request<User[]>("/api/v1/users/managed");
+  },
+  dismissUser(id: string) {
+    return request<User>(`/api/v1/users/${id}/dismiss`, { method: "PATCH" });
+  },
   usersByRole(branchId: string, role: RoleCode) {
     const params = new URLSearchParams({ branchId, role });
     return request<User[]>(`/api/v1/users?${params}`);
@@ -182,6 +212,12 @@ export const api = {
   startWork(id: string) {
     return request<Remark>(`/api/v1/remarks/${id}/start`, { method: "PATCH" });
   },
+  setEstimatedResolution(id: string, estimatedResolutionAt: string) {
+    return request<Remark>(`/api/v1/remarks/${id}/estimated-resolution`, {
+      method: "PATCH",
+      body: JSON.stringify({ estimatedResolutionAt }),
+    });
+  },
   resolve(id: string, resolutionMessage: string) {
     return request<Remark>(`/api/v1/remarks/${id}/resolve`, {
       method: "PATCH",
@@ -190,5 +226,11 @@ export const api = {
   },
   close(id: string) {
     return request<Remark>(`/api/v1/remarks/${id}/close`, { method: "PATCH" });
+  },
+  reports() {
+    return request<ReportNotification[]>("/api/v1/reports");
+  },
+  downloadReport(id: string) {
+    return requestBlob(`/api/v1/reports/${id}/download`);
   },
 };

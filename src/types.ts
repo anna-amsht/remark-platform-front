@@ -1,6 +1,7 @@
 export type RoleCode = "APPLICANT" | "MASTER" | "BRANCH_HEAD" | "ADMIN";
-export type UserStatus = "PENDING" | "ACTIVE" | "REJECTED";
+export type UserStatus = "PENDING" | "ACTIVE" | "REJECTED" | "DISMISSED";
 export type RemarkStatus = "NEW" | "ASSIGNED" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+export type EstimatedResolutionUnit = "HOURS" | "DAYS" | "WEEKS";
 
 export type Branch = {
   id: string;
@@ -46,6 +47,9 @@ export type Remark = {
   discoveredAt: string;
   createdByUserId: string;
   assignedMasterId: string | null;
+  estimatedResolutionDuration: number | null;
+  estimatedResolutionUnit: EstimatedResolutionUnit | null;
+  estimatedResolutionAt: string | null;
   status: RemarkStatus;
   resolutionMessage: string | null;
   resolvedAt: string | null;
@@ -68,4 +72,12 @@ export type RegisterPayload = {
   position: string;
   branchId: string;
   requestedRole: RoleCode;
+};
+
+export type ReportNotification = {
+  id: string;
+  remarkId: string;
+  remarkNumber: string;
+  fileName: string;
+  createdAt: string;
 };
