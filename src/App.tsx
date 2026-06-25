@@ -312,12 +312,6 @@ export function App() {
       setSelectedId(preferredRemark?.id ?? null);
       void loadRemarkUsers(data);
       if (hasRole(user, ["ADMIN", "BRANCH_HEAD"])) {
-        const masterBranch = data[0]?.branchId || user?.branchId || branchFilter;
-        if (masterBranch) {
-          const loadedMasters = await api.usersByRole(masterBranch, "MASTER");
-          setMasters(loadedMasters);
-          cacheUsers(loadedMasters);
-        }
         const loadedPendingUsers = await api.pendingUsers();
         setPendingUsers(loadedPendingUsers);
         cacheUsers(loadedPendingUsers);
@@ -1035,6 +1029,7 @@ function RemarkDetails({
       !remark.closedAt &&
       !remark.reportSentAt
     ) {
+      setMasterId("");
       void onNeedMasters(remark.branchId);
     }
   }, [remark?.id]);
@@ -1089,6 +1084,7 @@ function RemarkDetails({
   const assignedMaster = remark.assignedMasterId ? usersById[remark.assignedMasterId] : null;
   const reporter = usersById[remark.createdByUserId];
   const estimated = formatEstimatedResolution(remark);
+  const branchMasters = masters.filter((master) => master.branchId === remark.branchId);
 
   return (
     <section className="panel">
@@ -1161,7 +1157,7 @@ function RemarkDetails({
           >
             <select value={masterId} onChange={(event) => setMasterId(event.target.value)} required>
               <option value="">Выберите организацию</option>
-              {masters.map((master) => (
+              {branchMasters.map((master) => (
                 <option key={master.id} value={master.id}>
                   {master.fullName} · {master.position}
                 </option>
