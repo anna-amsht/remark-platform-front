@@ -59,6 +59,21 @@ export type Remark = {
   updatedAt: string;
 };
 
+export type RemarkCalendarEvent = {
+  remarkId: string;
+  remarkNumber: string;
+  title: string;
+  objectBuilding: string;
+  status: RemarkStatus;
+  workDate: string;
+  workStartTime: string;
+  workEndTime: string;
+  start: string;
+  end: string;
+  estimatedResolutionAt: string;
+  customTime: boolean;
+};
+
 export type CreateRemarkPayload = {
   objectBuilding: string;
   description: string;

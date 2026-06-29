@@ -5,6 +5,7 @@ import type {
   RegisterPayload,
   ReportNotification,
   Remark,
+  RemarkCalendarEvent,
   RemarkStatus,
   RoleCode,
   User,
@@ -196,6 +197,19 @@ export const api = {
     if (branchIdFilter) params.set("branchIdFilter", branchIdFilter);
     const query = params.toString();
     return request<Remark[]>(`/api/v1/remarks${query ? `?${query}` : ""}`);
+  },
+  calendarEvents(from: string, to: string) {
+    const params = new URLSearchParams({ from, to });
+    return request<RemarkCalendarEvent[]>(`/api/v1/remarks/calendar?${params}`);
+  },
+  setCalendarEvent(id: string, workDate: string, workStartTime: string, workEndTime: string) {
+    return request<RemarkCalendarEvent>(`/api/v1/remarks/${id}/calendar-events`, {
+      method: "POST",
+      body: JSON.stringify({ workDate, workStartTime, workEndTime }),
+    });
+  },
+  removeCalendarEvent(id: string, workDate: string) {
+    return request<void>(`/api/v1/remarks/${id}/calendar-events/${workDate}`, { method: "DELETE" });
   },
   createRemark(payload: CreateRemarkPayload) {
     return request<Remark>("/api/v1/remarks", {

@@ -4,7 +4,10 @@ import {
   AlertTriangle,
   BarChart3,
   Bell,
+  CalendarDays,
   Check,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   Download,
   FlipHorizontal,
@@ -23,11 +26,11 @@ import {
   X,
 } from "lucide-react";
 import { api, session } from "./api";
-import type { Branch, CreateRemarkPayload, RegisterPayload, ReportNotification, Remark, RemarkStatus, RoleCode, User, UserInfo } from "./types";
+import type { Branch, CreateRemarkPayload, RegisterPayload, ReportNotification, Remark, RemarkCalendarEvent, RemarkStatus, RoleCode, User, UserInfo } from "./types";
 
 const statuses: Array<RemarkStatus | ""> = ["", "NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"];
 const roleOptions: RoleCode[] = ["APPLICANT", "MASTER", "BRANCH_HEAD"];
-type View = "remarks" | "summary" | "notifications" | "employees";
+type View = "remarks" | "calendar" | "summary" | "notifications" | "employees";
 type EmployeeTab = "pending" | "employees";
 type Theme = "light" | "dark";
 
@@ -85,20 +88,28 @@ function formatEstimatedResolution(remark: Remark) {
     return { title: "Не указано", subtitle: "" };
   }
 
-  const discovered = new Date(`${remark.discoveredAt}T00:00:00`);
-  const estimatedAt = new Date(remark.estimatedResolutionAt);
-  const hours = Math.max(1, Math.ceil((estimatedAt.getTime() - discovered.getTime()) / 3_600_000));
-  const days = Math.max(1, Math.ceil(hours / 24));
-
   return {
-    title: `${days} дн. (${hours} ч.)`,
-    subtitle: remark.estimatedResolutionAt ? `до ${formatDateTime(remark.estimatedResolutionAt)}` : "",
+    title: `до ${formatDateTime(remark.estimatedResolutionAt)}`,
+    subtitle: "",
   };
 }
-
 function toDateTimeLocalValue(value?: string | null) {
   if (!value) return "";
   return value.slice(0, 16);
+}
+
+function currentDateTimeLocalValue() {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Minsk",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}`;
 }
 
 function readReportsKey(userId: string) {
@@ -119,6 +130,26 @@ function storeReadReportIds(userId: string, ids: Set<string>) {
   localStorage.setItem(readReportsKey(userId), JSON.stringify(Array.from(ids)));
 }
 
+function userSettingsKey(userId: string, key: string) {
+  return `remark.${userId}.${key}`;
+}
+
+function readTheme(userId?: string): Theme {
+  if (!userId) return "light";
+  return (localStorage.getItem(userSettingsKey(userId, "theme")) as Theme | null) ?? "light";
+}
+
+function readInverted(userId?: string) {
+  if (!userId) return false;
+  return localStorage.getItem(userSettingsKey(userId, "inverted")) === "true";
+}
+
+function readSidebarWidth(userId?: string) {
+  if (!userId) return 280;
+  const stored = Number(localStorage.getItem(userSettingsKey(userId, "sidebarWidth")));
+  return Number.isFinite(stored) && stored >= 240 && stored <= 520 ? stored : 280;
+}
+
 function hasRole(user: UserInfo | null, roles: RoleCode[]) {
   return Boolean(user?.roles.some((role) => roles.includes(role)));
 }
@@ -136,6 +167,10 @@ function userName(usersById: Record<string, User | UserInfo>, id?: string | null
 function userEmail(usersById: Record<string, User | UserInfo>, id?: string | null) {
   if (!id) return "";
   return usersById[id]?.email ?? "";
+}
+
+function calendarColorIndex(id: string) {
+  return Array.from(id).reduce((sum, char) => sum + char.charCodeAt(0), 0) % 8;
 }
 
 export function App() {
@@ -158,12 +193,9 @@ export function App() {
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("remark.theme") as Theme | null) ?? "light");
-  const [inverted, setInverted] = useState(() => localStorage.getItem("remark.inverted") === "true");
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const stored = Number(localStorage.getItem("remark.sidebarWidth"));
-    return Number.isFinite(stored) && stored >= 240 && stored <= 520 ? stored : 280;
-  });
+  const [theme, setTheme] = useState<Theme>(() => readTheme(session.user?.userId));
+  const [inverted, setInverted] = useState(() => readInverted(session.user?.userId));
+  const [sidebarWidth, setSidebarWidth] = useState(() => readSidebarWidth(session.user?.userId));
 
   const selectedRemark = useMemo(
     () => remarks.find((remark) => remark.id === selectedId) ?? null,
@@ -211,16 +243,22 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("remark.theme", theme);
-  }, [theme]);
+    if (user) {
+      localStorage.setItem(userSettingsKey(user.userId, "theme"), theme);
+    }
+  }, [theme, user?.userId]);
 
   useEffect(() => {
-    localStorage.setItem("remark.inverted", String(inverted));
-  }, [inverted]);
+    if (user) {
+      localStorage.setItem(userSettingsKey(user.userId, "inverted"), String(inverted));
+    }
+  }, [inverted, user?.userId]);
 
   useEffect(() => {
-    localStorage.setItem("remark.sidebarWidth", String(sidebarWidth));
-  }, [sidebarWidth]);
+    if (user) {
+      localStorage.setItem(userSettingsKey(user.userId, "sidebarWidth"), String(sidebarWidth));
+    }
+  }, [sidebarWidth, user?.userId]);
 
   function startSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -254,6 +292,9 @@ export function App() {
       setUsersById({});
       setStatusFilter("");
       setBranchFilter("");
+      setTheme(readTheme(user.userId));
+      setInverted(readInverted(user.userId));
+      setSidebarWidth(readSidebarWidth(user.userId));
       cacheUsers([user]);
       setReadReportIds(readStoredReadReportIds(user.userId));
       void refreshWorkplace();
@@ -422,6 +463,11 @@ export function App() {
           <button className={activeView === "remarks" ? "active" : ""} type="button" onClick={() => setActiveView("remarks")}>
             <ClipboardList size={18} /> Замечания
           </button>
+          {hasRole(user, ["MASTER"]) && (
+            <button className={activeView === "calendar" ? "active" : ""} type="button" onClick={() => setActiveView("calendar")}>
+              <CalendarDays size={18} /> Календарь
+            </button>
+          )}
           {hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && (
             <button className={activeView === "summary" ? "active" : ""} type="button" onClick={() => setActiveView("summary")}>
               <BarChart3 size={18} /> Сводная таблица
@@ -497,7 +543,16 @@ export function App() {
           </div>
         )}
 
-        {activeView === "notifications" && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? (
+        {activeView === "calendar" && hasRole(user, ["MASTER"]) ? (
+          <RepairCalendarView
+            remarks={remarks}
+            onOpenRemark={(remarkId) => {
+              setSelectedId(remarkId);
+              setActiveView("remarks");
+            }}
+            onError={setMessage}
+          />
+        ) : activeView === "notifications" && hasRole(user, ["ADMIN", "BRANCH_HEAD"]) ? (
           <ReportsView
             reports={reports}
             readReportIds={readReportIds}
@@ -1186,7 +1241,7 @@ function RemarkDetails({
                 value={estimatedResolutionAt}
                 onChange={(event) => setEstimatedResolutionAt(event.target.value)}
                 type="datetime-local"
-                min={`${remark.discoveredAt}T00:01`}
+                min={currentDateTimeLocalValue()}
                 required
               />
             </label>
@@ -1299,6 +1354,221 @@ function PendingUsers({
   );
 }
 
+function RepairCalendarView({
+  remarks,
+  onOpenRemark,
+  onError,
+}: {
+  remarks: Remark[];
+  onOpenRemark: (remarkId: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [month, setMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [events, setEvents] = useState<RemarkCalendarEvent[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(() => dayKey(new Date()));
+  const [selectedRemarkId, setSelectedRemarkId] = useState("");
+  const [workStartTime, setWorkStartTime] = useState("09:00");
+  const [workEndTime, setWorkEndTime] = useState("10:00");
+  const [calendarVersion, setCalendarVersion] = useState(0);
+
+  const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);
+  const monthEnd = new Date(month.getFullYear(), month.getMonth() + 1, 1);
+  const gridStart = new Date(monthStart);
+  gridStart.setDate(monthStart.getDate() - ((monthStart.getDay() + 6) % 7));
+  const gridEnd = new Date(monthEnd);
+  gridEnd.setDate(monthEnd.getDate() + ((7 - monthEnd.getDay()) % 7));
+  const gridLength = Math.round((gridEnd.getTime() - gridStart.getTime()) / 86_400_000);
+  const gridDays = Array.from({ length: gridLength }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    return date;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCalendar() {
+      setLoading(true);
+      try {
+        const loaded = await api.calendarEvents(toApiDateTime(monthStart), toApiDateTime(monthEnd));
+        if (!cancelled) {
+          setEvents(loaded);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          onError(error instanceof Error ? error.message : "Не удалось загрузить календарь");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+    void loadCalendar();
+    return () => {
+      cancelled = true;
+    };
+  }, [month.getFullYear(), month.getMonth(), calendarVersion]);
+
+  function toApiDateTime(date: Date) {
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 19);
+  }
+
+  function dayKey(date: Date) {
+    return toApiDateTime(date).slice(0, 10);
+  }
+
+  function eventsForDay(dateKey: string) {
+    return events.filter((event) => event.workDate === dateKey);
+  }
+
+  function isPastEvent(event: RemarkCalendarEvent) {
+    return event.workDate < dayKey(new Date());
+  }
+
+  function moveMonth(delta: number) {
+    setMonth((current) => new Date(current.getFullYear(), current.getMonth() + delta, 1));
+  }
+
+  function remarkCoversDate(remark: Remark, dateKey: string) {
+    if (!remark.estimatedResolutionAt || !remark.assignedMasterId || remark.status === "RESOLVED" || remark.status === "CLOSED") {
+      return false;
+    }
+    const createdDate = remark.createdAt.slice(0, 10);
+    const estimatedDate = remark.estimatedResolutionAt.slice(0, 10);
+    return createdDate <= dateKey && dateKey <= estimatedDate;
+  }
+
+  const selectedDateEvents = eventsForDay(selectedDate);
+  const availableRemarks = remarks.filter((remark) => remarkCoversDate(remark, selectedDate));
+
+  useEffect(() => {
+    if (!selectedRemarkId && availableRemarks[0]) {
+      setSelectedRemarkId(availableRemarks[0].id);
+    }
+  }, [selectedDate, availableRemarks.map((remark) => remark.id).join(",")]);
+
+  async function saveCalendarEvent(event?: RemarkCalendarEvent) {
+    const remarkId = event?.remarkId ?? selectedRemarkId;
+    if (!remarkId) {
+      onError("Выберите замечание для календаря");
+      return;
+    }
+    const startTime = event ? event.workStartTime.slice(0, 5) : workStartTime;
+    const endTime = event ? event.workEndTime.slice(0, 5) : workEndTime;
+    try {
+      await api.setCalendarEvent(remarkId, event?.workDate ?? selectedDate, startTime, endTime);
+      setCalendarVersion((value) => value + 1);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось сохранить событие календаря");
+    }
+  }
+
+  async function removeCalendarEvent(event: RemarkCalendarEvent) {
+    try {
+      await api.removeCalendarEvent(event.remarkId, event.workDate);
+      setCalendarVersion((value) => value + 1);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Не удалось убрать событие календаря");
+    }
+  }
+
+  return (
+    <section className="calendar-layout">
+      <section className="calendar-view">
+        <div className="calendar-toolbar">
+          <div>
+            <h2>Календарь ремонтов</h2>
+            <span>{new Intl.DateTimeFormat("ru-RU", { month: "long", year: "numeric" }).format(monthStart)}</span>
+          </div>
+          <div className="calendar-actions">
+            <button className="icon-button" type="button" onClick={() => moveMonth(-1)} title="Предыдущий месяц">
+              <ChevronLeft size={18} />
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1))}>
+              Сегодня
+            </button>
+            <button className="icon-button" type="button" onClick={() => moveMonth(1)} title="Следующий месяц">
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="calendar-weekdays">
+          {["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((day) => (
+            <span key={day}>{day}</span>
+          ))}
+        </div>
+        <div className="calendar-grid">
+          {gridDays.map((day) => {
+            const currentKey = dayKey(day);
+            const dayEvents = eventsForDay(currentKey);
+            const outside = day.getMonth() !== month.getMonth();
+            const todayKey = dayKey(new Date());
+            return (
+              <div key={currentKey} className={`calendar-day${outside ? " outside" : ""}${currentKey === todayKey ? " today" : ""}${currentKey === selectedDate ? " selected" : ""}`} onClick={() => setSelectedDate(currentKey)}>
+                <div className="calendar-date">{day.getDate()}</div>
+                <div className="calendar-events">
+                  {dayEvents.map((event) => (
+                    <article key={`${event.remarkId}-${event.workDate}`} className={`calendar-event event-color-${calendarColorIndex(event.remarkId)}${isPastEvent(event) ? " past" : ""}`} onClick={(clickEvent) => clickEvent.stopPropagation()}>
+                      <button type="button" className="calendar-event-open" onClick={() => onOpenRemark(event.remarkId)}>
+                        <strong>{event.workStartTime.slice(0, 5)}-{event.workEndTime.slice(0, 5)}</strong>
+                        <span>{event.remarkNumber}</span>
+                        <small>{event.objectBuilding}</small>
+                      </button>
+                      <div className="calendar-event-controls">
+                        <input aria-label="Начало работы" type="time" defaultValue={event.workStartTime.slice(0, 5)} onChange={(changeEvent) => { event.workStartTime = changeEvent.target.value; }} />
+                        <input aria-label="Окончание работы" type="time" defaultValue={event.workEndTime.slice(0, 5)} onChange={(changeEvent) => { event.workEndTime = changeEvent.target.value; }} />
+                        <button type="button" onClick={() => saveCalendarEvent(event)}>OK</button>
+                        <button type="button" onClick={() => removeCalendarEvent(event)} title="Убрать карточку">X</button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {loading && <div className="empty-state small">Календарь загружается...</div>}
+        {!loading && !events.length && <div className="empty-state small">На этот месяц сроков ремонта нет</div>}
+      </section>
+
+      <aside className="calendar-editor panel">
+        <div className="panel-title">
+          <div>
+            <h2>План на день</h2>
+            <span>{formatDate(selectedDate)}</span>
+          </div>
+          <span className="counter">{selectedDateEvents.length}</span>
+        </div>
+        <form className="form compact" onSubmit={(event) => { event.preventDefault(); void saveCalendarEvent(); }}>
+          <label>
+            Замечание
+            <select value={selectedRemarkId} onChange={(event) => setSelectedRemarkId(event.target.value)} required>
+              {availableRemarks.map((remark) => (
+                <option key={remark.id} value={remark.id}>{remark.remarkNumber} · {remark.objectBuilding}</option>
+              ))}
+            </select>
+          </label>
+          <div className="calendar-time-row">
+            <label>
+              Начало
+              <input type="time" value={workStartTime} onChange={(event) => setWorkStartTime(event.target.value)} required />
+            </label>
+            <label>
+              Окончание
+              <input type="time" value={workEndTime} onChange={(event) => setWorkEndTime(event.target.value)} required />
+            </label>
+          </div>
+          <button className="secondary-button" type="submit" disabled={!availableRemarks.length}>Добавить карточку</button>
+        </form>
+      </aside>
+    </section>
+  );
+}
 function ReportsView({
   reports,
   readReportIds,
