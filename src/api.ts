@@ -105,13 +105,55 @@ async function requestBlob(path: string): Promise<{ blob: Blob; fileName: string
 }
 
 async function extractError(response: Response): Promise<string> {
-  const fallback = `Ошибка ${response.status}`;
+  const fallback = translateErrorMessage("", response.status);
   try {
     const body = await response.json();
-    return body.detail || body.message || body.title || fallback;
+    return translateErrorMessage(body.detail || body.message || body.title || "", response.status);
   } catch {
     return fallback;
   }
+}
+
+function translateErrorMessage(message: string, status: number): string {
+  const text = String(message || "").trim();
+  const statusMessages: Record<number, string> = {
+    400: "Некорректный запрос. Проверьте введенные данные.",
+    401: "Необходимо войти в систему.",
+    403: "Недостаточно прав для выполнения действия.",
+    404: "Запрашиваемые данные не найдены.",
+    409: "Действие конфликтует с текущим состоянием данных.",
+    422: "Проверьте заполнение полей.",
+    500: "Внутренняя ошибка сервера.",
+    502: "Сервис временно недоступен.",
+    503: "Сервис временно недоступен.",
+    504: "Сервис не отвечает. Попробуйте позже.",
+  };
+
+  if (!text) {
+    return statusMessages[status] ?? `Ошибка ${status}`;
+  }
+
+  const translations: Array<[RegExp, string]> = [
+    [/bad credentials|invalid credentials|invalid username or password|unauthorized/i, "Неверный email или пароль."],
+    [/access denied|forbidden|permission|not permitted/i, "Недостаточно прав для выполнения действия."],
+    [/not found|no .* found/i, "Запрашиваемые данные не найдены."],
+    [/already exists|duplicate|conflict/i, "Такая запись уже существует."],
+    [/validation|invalid|must not be blank|required/i, "Проверьте заполнение полей."],
+    [/failed to fetch|networkerror|network error/i, "Не удалось подключиться к серверу."],
+    [/internal server error/i, "Внутренняя ошибка сервера."],
+    [/service unavailable|bad gateway|gateway timeout/i, "Сервис временно недоступен. Попробуйте позже."],
+  ];
+  const matched = translations.find(([pattern]) => pattern.test(text));
+
+  if (matched) {
+    return matched[1];
+  }
+
+  if (/^[\x00-\x7F]+$/.test(text) && /[a-z]/i.test(text)) {
+    return statusMessages[status] ?? "Произошла ошибка. Попробуйте позже.";
+  }
+
+  return text;
 }
 
 async function refreshToken(): Promise<boolean> {

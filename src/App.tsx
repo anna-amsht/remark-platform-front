@@ -130,24 +130,35 @@ function storeReadReportIds(userId: string, ids: Set<string>) {
   localStorage.setItem(readReportsKey(userId), JSON.stringify(Array.from(ids)));
 }
 
-function userSettingsKey(userId: string, key: string) {
-  return `remark.${userId}.${key}`;
+const tabSettingsKey = {
+  theme: "remark.tab.theme",
+  inverted: "remark.tab.inverted",
+  sidebarWidth: "remark.tab.sidebarWidth",
+} as const;
+
+function readTheme(): Theme {
+  return (sessionStorage.getItem(tabSettingsKey.theme) as Theme | null) ?? "light";
 }
 
-function readTheme(userId?: string): Theme {
-  if (!userId) return "light";
-  return (localStorage.getItem(userSettingsKey(userId, "theme")) as Theme | null) ?? "light";
+function readInverted() {
+  return sessionStorage.getItem(tabSettingsKey.inverted) === "true";
 }
 
-function readInverted(userId?: string) {
-  if (!userId) return false;
-  return localStorage.getItem(userSettingsKey(userId, "inverted")) === "true";
-}
-
-function readSidebarWidth(userId?: string) {
-  if (!userId) return 280;
-  const stored = Number(localStorage.getItem(userSettingsKey(userId, "sidebarWidth")));
+function readSidebarWidth() {
+  const stored = Number(sessionStorage.getItem(tabSettingsKey.sidebarWidth));
   return Number.isFinite(stored) && stored >= 240 && stored <= 520 ? stored : 280;
+}
+
+function storeTabTheme(theme: Theme) {
+  sessionStorage.setItem(tabSettingsKey.theme, theme);
+}
+
+function storeTabInverted(inverted: boolean) {
+  sessionStorage.setItem(tabSettingsKey.inverted, String(inverted));
+}
+
+function storeTabSidebarWidth(width: number) {
+  sessionStorage.setItem(tabSettingsKey.sidebarWidth, String(width));
 }
 
 function hasRole(user: UserInfo | null, roles: RoleCode[]) {
@@ -193,9 +204,9 @@ export function App() {
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [theme, setTheme] = useState<Theme>(() => readTheme(session.user?.userId));
-  const [inverted, setInverted] = useState(() => readInverted(session.user?.userId));
-  const [sidebarWidth, setSidebarWidth] = useState(() => readSidebarWidth(session.user?.userId));
+  const [theme, setTheme] = useState<Theme>(() => readTheme());
+  const [inverted, setInverted] = useState(() => readInverted());
+  const [sidebarWidth, setSidebarWidth] = useState(() => readSidebarWidth());
 
   const selectedRemark = useMemo(
     () => remarks.find((remark) => remark.id === selectedId) ?? null,
@@ -243,22 +254,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem(userSettingsKey(user.userId, "theme"), theme);
-    }
-  }, [theme, user?.userId]);
+    storeTabTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem(userSettingsKey(user.userId, "inverted"), String(inverted));
-    }
-  }, [inverted, user?.userId]);
+    storeTabInverted(inverted);
+  }, [inverted]);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem(userSettingsKey(user.userId, "sidebarWidth"), String(sidebarWidth));
-    }
-  }, [sidebarWidth, user?.userId]);
+    storeTabSidebarWidth(sidebarWidth);
+  }, [sidebarWidth]);
 
   function startSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -292,9 +297,6 @@ export function App() {
       setUsersById({});
       setStatusFilter("");
       setBranchFilter("");
-      setTheme(readTheme(user.userId));
-      setInverted(readInverted(user.userId));
-      setSidebarWidth(readSidebarWidth(user.userId));
       cacheUsers([user]);
       setReadReportIds(readStoredReadReportIds(user.userId));
       void refreshWorkplace();
@@ -426,10 +428,12 @@ export function App() {
         branches={branches}
         mode={authMode}
         message={message}
+        theme={theme}
         branchesLoading={branchesLoading}
         onModeChange={setAuthMode}
         onMessage={setMessage}
         onReloadBranches={() => loadBranches(true)}
+        onThemeChange={setTheme}
         onLogin={setUser}
       />
     );
@@ -718,69 +722,87 @@ function AuthScreen({
   branchesLoading,
   mode,
   message,
+  theme,
   onModeChange,
   onMessage,
   onReloadBranches,
+  onThemeChange,
   onLogin,
 }: {
   branches: Branch[];
   branchesLoading: boolean;
   mode: "login" | "register";
   message: string;
+  theme: Theme;
   onModeChange: (mode: "login" | "register") => void;
   onMessage: (message: string) => void;
   onReloadBranches: () => Promise<void>;
+  onThemeChange: (theme: Theme) => void;
   onLogin: (user: UserInfo) => void;
 }) {
   return (
-    <div className="auth-layout">
+    <div className={`auth-layout theme-${theme}`}>
+      <button
+        className="auth-theme-toggle"
+        type="button"
+        onClick={() => onThemeChange(theme === "light" ? "dark" : "light")}
+        title={theme === "light" ? "Тёмная тема" : "Светлая тема"}
+      >
+        {theme === "light" ? <Moon size={20} /> : <Sun size={20} />}
+      </button>
+
+      <div className="auth-backdrop" aria-hidden="true">
+        <div className="auth-glow auth-glow-1" />
+        <div className="auth-glow auth-glow-2" />
+        <div className="auth-glow auth-glow-3" />
+        <div className="auth-mesh" />
+      </div>
+
       <section className="auth-info">
-        <div className="brand auth-brand">
-          <ClipboardList size={30} />
-          <div>
-            <strong>Журнал замечаний</strong>
-            <span>Учет дефектов и поломок</span>
-          </div>
-        </div>
-        <h1>Единое рабочее место для контроля производственных замечаний</h1>
-        <div className="auth-stats">
-          <span>NEW</span>
-          <span>ASSIGNED</span>
-          <span>IN_PROGRESS</span>
-          <span>RESOLVED</span>
-          <span>CLOSED</span>
-        </div>
+        <h1 className="auth-title">
+          <span>Журнал</span>
+          <span>замечаний</span>
+        </h1>
       </section>
 
-      <section className="auth-card">
-        <div className="tabs">
-          <button className={mode === "login" ? "active" : ""} onClick={() => onModeChange("login")} type="button">
-            Вход
-          </button>
-          <button className={mode === "register" ? "active" : ""} onClick={() => onModeChange("register")} type="button">
-            Регистрация
-          </button>
+      <section className="auth-panel">
+        <div className="auth-card">
+          <div className="auth-card-head">
+            <h2>{mode === "login" ? "Вход в систему" : "Регистрация"}</h2>
+            <p>{mode === "login" ? "Введите учётные данные для доступа" : "Заполните форму для подачи заявки"}</p>
+          </div>
+
+          <div className="tabs auth-tabs">
+            <button className={mode === "login" ? "active" : ""} onClick={() => onModeChange("login")} type="button">
+              Вход
+            </button>
+            <button className={mode === "register" ? "active" : ""} onClick={() => onModeChange("register")} type="button">
+              Регистрация
+            </button>
+          </div>
+
+          {message && <div className="form-message">{message}</div>}
+
+          {mode === "login" ? (
+            <LoginForm onLogin={onLogin} onError={onMessage} />
+          ) : (
+            <RegisterForm
+              branches={branches}
+              branchesLoading={branchesLoading}
+              onReloadBranches={onReloadBranches}
+              onDone={() => onModeChange("login")}
+              onMessage={onMessage}
+            />
+          )}
         </div>
-        {message && <div className="form-message">{message}</div>}
-        {mode === "login" ? (
-          <LoginForm onLogin={onLogin} onError={onMessage} />
-        ) : (
-          <RegisterForm
-            branches={branches}
-            branchesLoading={branchesLoading}
-            onReloadBranches={onReloadBranches}
-            onDone={() => onModeChange("login")}
-            onMessage={onMessage}
-          />
-        )}
       </section>
     </div>
   );
 }
 
 function LoginForm({ onLogin, onError }: { onLogin: (user: UserInfo) => void; onError: (message: string) => void }) {
-  const [email, setEmail] = useState("admin-1212@remark.local");
-  const [password, setPassword] = useState("Admin123!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent) {
@@ -896,12 +918,9 @@ function RegisterForm({
         </select>
       </label>
       {branches.length === 0 && (
-        <div className="form-hint">
-          <span>Список должен прийти из `/api/v1/refs/branches` после применения `changelog-seed-branches.xml`.</span>
-          <button className="secondary-button" type="button" onClick={onReloadBranches} disabled={branchesLoading}>
-            <RefreshCw size={16} className={branchesLoading ? "spin" : ""} /> Обновить филиалы
-          </button>
-        </div>
+        <button className="secondary-button" type="button" onClick={onReloadBranches} disabled={branchesLoading}>
+          <RefreshCw size={16} className={branchesLoading ? "spin" : ""} /> Обновить филиалы
+        </button>
       )}
       <label>
         Роль
