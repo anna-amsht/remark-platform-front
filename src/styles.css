@@ -403,6 +403,38 @@ dl {
   line-height: 1.2;
 }
 
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.table-pagination-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.table-pagination button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--soft-bg);
+  color: var(--text);
+}
+
+.table-pagination button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .toolbar {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 170px 210px;
@@ -444,6 +476,12 @@ textarea {
   border: 1px solid var(--input-border);
   border-radius: 8px;
   outline: 0;
+}
+
+.theme-dark input[type="date"],
+.theme-dark input[type="time"],
+.theme-dark input[type="datetime-local"] {
+  color-scheme: dark;
 }
 
 input,

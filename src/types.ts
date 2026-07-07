@@ -1,6 +1,6 @@
 export type RoleCode = "APPLICANT" | "MASTER" | "BRANCH_HEAD" | "ADMIN";
 export type UserStatus = "PENDING" | "ACTIVE" | "REJECTED" | "DISMISSED";
-export type RemarkStatus = "NEW" | "ASSIGNED" | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
+export type RemarkStatus = "NEW" | "ASSIGNED" | "IN_PROGRESS" | "RESOLVED";
 export type EstimatedResolutionUnit = "HOURS" | "DAYS" | "WEEKS";
 
 export type Branch = {
@@ -95,4 +95,14 @@ export type ReportNotification = {
   remarkNumber: string;
   fileName: string;
   createdAt: string;
+};
+
+export type PagedRemarks = {
+  content: Remark[];
+  page: number;
+  size: number;
+  totalElements: number;
+  totalPages: number;
+  first: boolean;
+  last: boolean;
 };

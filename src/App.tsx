@@ -26,10 +26,12 @@ import {
   X,
 } from "lucide-react";
 import { api, session } from "./api";
-import type { Branch, CreateRemarkPayload, RegisterPayload, ReportNotification, Remark, RemarkCalendarEvent, RemarkStatus, RoleCode, User, UserInfo } from "./types";
+import type { Branch, CreateRemarkPayload, RegisterPayload, ReportNotification, Remark, RemarkCalendarEvent, RemarkStatus, RoleCode, User, UserInfo, PagedRemarks } from "./types";
 
-const statuses: Array<RemarkStatus | ""> = ["", "NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED", "CLOSED"];
+const statuses: Array<RemarkStatus | ""> = ["", "NEW", "ASSIGNED", "IN_PROGRESS", "RESOLVED"];
 const roleOptions: RoleCode[] = ["APPLICANT", "MASTER", "BRANCH_HEAD"];
+const REMARKS_PAGE_SIZE = 10;
+const REMARKS_WORKLOAD_PAGE_SIZE = 500;
 type View = "remarks" | "calendar" | "summary" | "notifications" | "employees";
 type EmployeeTab = "pending" | "employees";
 type Theme = "light" | "dark";
@@ -39,7 +41,6 @@ const statusLabel: Record<RemarkStatus, string> = {
   ASSIGNED: "Назначено",
   IN_PROGRESS: "В работе",
   RESOLVED: "Устранено",
-  CLOSED: "Закрыто",
 };
 
 const roleLabel: Record<RoleCode, string> = {
@@ -54,11 +55,17 @@ const statusClass: Record<RemarkStatus, string> = {
   ASSIGNED: "assigned",
   IN_PROGRESS: "progress",
   RESOLVED: "resolved",
-  CLOSED: "closed",
 };
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Europe/Minsk",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function formatDate(value?: string | null) {
@@ -80,9 +87,6 @@ function formatDateTime(value?: string | null) {
 function formatEstimatedResolution(remark: Remark) {
   if (remark.resolvedAt) {
     return { title: formatDateTime(remark.resolvedAt), subtitle: "" };
-  }
-  if (remark.status === "CLOSED") {
-    return { title: formatDateTime(remark.closedAt), subtitle: "" };
   }
   if (!remark.estimatedResolutionAt) {
     return { title: "Не указано", subtitle: "" };
@@ -189,6 +193,12 @@ export function App() {
   const [activeView, setActiveView] = useState<View>("remarks");
   const [branches, setBranches] = useState<Branch[]>([]);
   const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [remarksPage, setRemarksPage] = useState<PagedRemarks | null>(null);
+  const [ownBranchRemarks, setOwnBranchRemarks] = useState<Remark[]>([]);
+  const [ownBranchPage, setOwnBranchPage] = useState<PagedRemarks | null>(null);
+  const [page, setPage] = useState(0);
+  const [ownBranchPageIndex, setOwnBranchPageIndex] = useState(0);
+  const [selectedRemarkCache, setSelectedRemarkCache] = useState<Remark | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
   const [managedUsers, setManagedUsers] = useState<User[]>([]);
@@ -196,6 +206,7 @@ export function App() {
   const [readReportIds, setReadReportIds] = useState<Set<string>>(() => new Set());
   const [employeeTab, setEmployeeTab] = useState<EmployeeTab>("pending");
   const [masters, setMasters] = useState<User[]>([]);
+  const [masterWorkloadRemarks, setMasterWorkloadRemarks] = useState<Remark[]>([]);
   const [usersById, setUsersById] = useState<Record<string, User | UserInfo>>({});
   const [statusFilter, setStatusFilter] = useState<RemarkStatus | "">("");
   const [branchFilter, setBranchFilter] = useState("");
@@ -209,25 +220,11 @@ export function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => readSidebarWidth());
 
   const selectedRemark = useMemo(
-    () => remarks.find((remark) => remark.id === selectedId) ?? null,
-    [remarks, selectedId],
+    () => remarks.find((remark) => remark.id === selectedId) ?? ownBranchRemarks.find((remark) => remark.id === selectedId) ?? selectedRemarkCache,
+    [remarks, ownBranchRemarks, selectedId, selectedRemarkCache],
   );
 
-  const visibleRemarks = useMemo(() => {
-    const text = query.trim().toLowerCase();
-    if (!text) return remarks;
-    return remarks.filter((remark) =>
-      [remark.remarkNumber, remark.objectBuilding, remark.description, statusLabel[remark.status]]
-        .join(" ")
-        .toLowerCase()
-        .includes(text),
-    );
-  }, [query, remarks]);
-
-  const ownBranchRemarks = useMemo(
-    () => visibleRemarks.filter((remark) => remark.branchId === user?.branchId),
-    [visibleRemarks, user?.branchId],
-  );
+  const visibleRemarks = remarks;
 
   const detailRemark = useMemo(() => {
     if (!selectedRemark) return null;
@@ -237,7 +234,6 @@ export function App() {
         selectedRemark.status === "NEW" &&
         !selectedRemark.assignedMasterId &&
         !selectedRemark.resolvedAt &&
-        !selectedRemark.closedAt &&
         !selectedRemark.reportSentAt;
       return canAssignOrganization ? selectedRemark : null;
     }
@@ -291,23 +287,36 @@ export function App() {
     if (user) {
       setSelectedId(null);
       setMasters([]);
+      setMasterWorkloadRemarks([]);
       setPendingUsers([]);
       setManagedUsers([]);
       setReports([]);
       setUsersById({});
       setStatusFilter("");
       setBranchFilter("");
+      setPage(0);
+      setOwnBranchPageIndex(0);
+      setOwnBranchRemarks([]);
+      setOwnBranchPage(null);
+      setRemarksPage(null);
+      setSelectedRemarkCache(null);
       cacheUsers([user]);
       setReadReportIds(readStoredReadReportIds(user.userId));
-      void refreshWorkplace();
     }
   }, [user]);
 
   useEffect(() => {
     if (user) {
+      setPage(0);
+      setOwnBranchPageIndex(0);
+    }
+  }, [statusFilter, branchFilter, activeView, query, user]);
+
+  useEffect(() => {
+    if (user) {
       void refreshWorkplace();
     }
-  }, [statusFilter, branchFilter, activeView]);
+  }, [user, page, ownBranchPageIndex, statusFilter, branchFilter, activeView, query]);
 
   useEffect(() => {
     if (!user || hasRole(user, ["ADMIN", "BRANCH_HEAD"])) return;
@@ -343,17 +352,54 @@ export function App() {
   }
 
   async function refreshWorkplace() {
+    if (!user) return;
     setLoading(true);
     setMessage("");
     try {
-      const branchId = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && activeView === "summary" ? branchFilter || undefined : undefined;
-      const data = await api.remarks(statusFilter || undefined, branchId);
-      const preferredRemark = hasRole(user, ["ADMIN", "BRANCH_HEAD"])
-        ? data.find((item) => item.branchId === user?.branchId) ?? data[0]
-        : data[0];
-      setRemarks(data);
-      setSelectedId(preferredRemark?.id ?? null);
-      void loadRemarkUsers(data);
+      const search = query.trim() || undefined;
+      const status = statusFilter || undefined;
+      const branchId =
+        hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && activeView === "summary" ? branchFilter || undefined : undefined;
+      const showOwnBranchTable = hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && activeView !== "summary" && Boolean(user.branchId);
+
+      const mainRequest = api.remarks({
+        status,
+        branchIdFilter: branchId,
+        page,
+        size: REMARKS_PAGE_SIZE,
+        search,
+      });
+      const ownBranchRequest = showOwnBranchTable
+        ? api.remarks({
+            status,
+            branchIdFilter: user.branchId,
+            page: ownBranchPageIndex,
+            size: REMARKS_PAGE_SIZE,
+            search,
+          })
+        : null;
+
+      const [mainData, ownData] = await Promise.all([mainRequest, ownBranchRequest]);
+      setRemarks(mainData.content);
+      setRemarksPage(mainData);
+      if (ownData) {
+        setOwnBranchRemarks(ownData.content);
+        setOwnBranchPage(ownData);
+      } else {
+        setOwnBranchRemarks([]);
+        setOwnBranchPage(null);
+      }
+
+      if (!selectedId) {
+        const preferredRemark = hasRole(user, ["ADMIN", "BRANCH_HEAD"])
+          ? mainData.content.find((item) => item.branchId === user.branchId) ?? ownData?.content[0] ?? mainData.content[0]
+          : mainData.content[0];
+        setSelectedId(preferredRemark?.id ?? null);
+        setSelectedRemarkCache(preferredRemark ?? null);
+      }
+
+      const loadedRemarks = [...mainData.content, ...(ownData?.content ?? [])];
+      void loadRemarkUsers(loadedRemarks);
       if (hasRole(user, ["ADMIN", "BRANCH_HEAD"])) {
         const loadedPendingUsers = await api.pendingUsers();
         setPendingUsers(loadedPendingUsers);
@@ -376,11 +422,18 @@ export function App() {
     await api.logout();
     setUser(null);
     setRemarks([]);
+    setRemarksPage(null);
+    setOwnBranchRemarks([]);
+    setOwnBranchPage(null);
+    setPage(0);
+    setOwnBranchPageIndex(0);
+    setSelectedRemarkCache(null);
     setPendingUsers([]);
     setManagedUsers([]);
     setReports([]);
     setReadReportIds(new Set());
     setMasters([]);
+    setMasterWorkloadRemarks([]);
     setUsersById({});
     setActiveView("remarks");
   }
@@ -390,7 +443,19 @@ export function App() {
       const exists = items.some((item) => item.id === updated.id);
       return exists ? items.map((item) => (item.id === updated.id ? updated : item)) : [updated, ...items];
     });
+    setOwnBranchRemarks((items) => {
+      const exists = items.some((item) => item.id === updated.id);
+      return exists ? items.map((item) => (item.id === updated.id ? updated : item)) : items;
+    });
+    setSelectedRemarkCache(updated);
     setSelectedId(updated.id);
+  }
+
+  function selectRemark(id: string, remark?: Remark) {
+    setSelectedId(id);
+    if (remark) {
+      setSelectedRemarkCache(remark);
+    }
   }
 
   async function ensureUserLoaded(id?: string | null) {
@@ -549,7 +614,6 @@ export function App() {
 
         {activeView === "calendar" && hasRole(user, ["MASTER"]) ? (
           <RepairCalendarView
-            remarks={remarks}
             onOpenRemark={(remarkId) => {
               setSelectedId(remarkId);
               setActiveView("remarks");
@@ -613,8 +677,9 @@ export function App() {
                   branches={branches}
                   usersById={usersById}
                   selectedId={selectedRemark?.id}
-                  onSelect={setSelectedId}
+                  onSelect={(id) => selectRemark(id, visibleRemarks.find((item) => item.id === id))}
                 />
+                <RemarkPagination page={remarksPage} onPageChange={setPage} />
               </div>
             </div>
           </section>
@@ -657,8 +722,9 @@ export function App() {
                   branches={branches}
                   usersById={usersById}
                   selectedId={selectedRemark?.id}
-                  onSelect={setSelectedId}
+                  onSelect={(id) => selectRemark(id, ownBranchRemarks.find((item) => item.id === id))}
                 />
+                <RemarkPagination page={ownBranchPage} onPageChange={setOwnBranchPageIndex} />
               </div>
             )}
 
@@ -672,13 +738,14 @@ export function App() {
                 onSelect={(id) => {
                   const remark = visibleRemarks.find((item) => item.id === id);
                   if (hasRole(user, ["ADMIN", "BRANCH_HEAD"]) && remark?.branchId !== user.branchId) {
-                    setSelectedId(null);
+                    selectRemark(id, remark);
                     setMessage("Замечание другого филиала доступно только в сводной таблице без назначения ответственной организации.");
                     return;
                   }
-                  setSelectedId(id);
+                  selectRemark(id, remark);
                 }}
               />
+              <RemarkPagination page={remarksPage} onPageChange={setPage} />
             </div>
           </div>
 
@@ -698,11 +765,16 @@ export function App() {
               remark={detailRemark}
               branches={branches}
               masters={masters}
+              workloadRemarks={masterWorkloadRemarks}
               usersById={usersById}
               onUpdated={replaceRemark}
               onNeedMasters={async (branchId) => {
-                const loadedMasters = await api.usersByRole(branchId, "MASTER");
+                const [loadedMasters, workloadPage] = await Promise.all([
+                  api.usersByRole(branchId, "MASTER"),
+                  api.remarks({ branchIdFilter: branchId, page: 0, size: REMARKS_WORKLOAD_PAGE_SIZE }),
+                ]);
                 setMasters(loadedMasters);
+                setMasterWorkloadRemarks(workloadPage.content);
                 cacheUsers(loadedMasters);
               }}
               onNeedUser={ensureUserLoaded}
@@ -939,6 +1011,34 @@ function RegisterForm({
   );
 }
 
+function RemarkPagination({
+  page,
+  onPageChange,
+}: {
+  page: PagedRemarks | null;
+  onPageChange: (page: number) => void;
+}) {
+  if (!page || page.totalPages <= 1) {
+    return null;
+  }
+
+  return (
+    <div className="table-pagination">
+      <span>
+        Страница {page.page + 1} из {page.totalPages} · всего {page.totalElements}
+      </span>
+      <div className="table-pagination-actions">
+        <button type="button" disabled={page.first} onClick={() => onPageChange(page.page - 1)}>
+          <ChevronLeft size={16} /> Назад
+        </button>
+        <button type="button" disabled={page.last} onClick={() => onPageChange(page.page + 1)}>
+          Вперёд <ChevronRight size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function RemarkTable({
   remarks,
   branches,
@@ -1031,6 +1131,10 @@ function CreateRemarkForm({ onCreated, onError }: { onCreated: (remark: Remark) 
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (form.discoveredAt > today()) {
+      onError("Дата обнаружения не может быть позже текущей даты");
+      return;
+    }
     try {
       const remark = await api.createRemark(form);
       onCreated(remark);
@@ -1053,7 +1157,7 @@ function CreateRemarkForm({ onCreated, onError }: { onCreated: (remark: Remark) 
         </label>
         <label>
           Дата обнаружения
-          <input value={form.discoveredAt} onChange={(event) => setForm({ ...form, discoveredAt: event.target.value })} type="date" required />
+          <input value={form.discoveredAt} onChange={(event) => setForm({ ...form, discoveredAt: event.target.value })} type="date" max={today()} required />
         </label>
         <label>
           Описание дефекта
@@ -1072,6 +1176,7 @@ function RemarkDetails({
   remark,
   branches,
   masters,
+  workloadRemarks,
   usersById,
   onUpdated,
   onNeedMasters,
@@ -1082,6 +1187,7 @@ function RemarkDetails({
   remark: Remark | null;
   branches: Branch[];
   masters: User[];
+  workloadRemarks: Remark[];
   usersById: Record<string, User | UserInfo>;
   onUpdated: (remark: Remark) => void;
   onNeedMasters: (branchId: string) => Promise<void>;
@@ -1100,7 +1206,6 @@ function RemarkDetails({
       remark.status === "NEW" &&
       !remark.assignedMasterId &&
       !remark.resolvedAt &&
-      !remark.closedAt &&
       !remark.reportSentAt
     ) {
       setMasterId("");
@@ -1145,7 +1250,6 @@ function RemarkDetails({
     remark.status === "NEW" &&
     !remark.assignedMasterId &&
     !remark.resolvedAt &&
-    !remark.closedAt &&
     !remark.reportSentAt;
   const canStart = hasRole(user, ["MASTER"]) && remark.status === "ASSIGNED" && remark.assignedMasterId === user.userId;
   const canResolve = hasRole(user, ["MASTER"]) && remark.status === "IN_PROGRESS" && remark.assignedMasterId === user.userId;
@@ -1153,12 +1257,18 @@ function RemarkDetails({
     hasRole(user, ["MASTER"]) &&
     remark.assignedMasterId === user.userId &&
     (remark.status === "ASSIGNED" || remark.status === "IN_PROGRESS");
-  const canClose = canManageRemark && remark.status === "RESOLVED";
-  const hasActions = canAssign || canSetEstimatedResolution || canStart || canResolve || canClose;
+  const hasActions = canAssign || canSetEstimatedResolution || canStart || canResolve;
   const assignedMaster = remark.assignedMasterId ? usersById[remark.assignedMasterId] : null;
   const reporter = usersById[remark.createdByUserId];
   const estimated = formatEstimatedResolution(remark);
   const branchMasters = masters.filter((master) => master.branchId === remark.branchId);
+  const activeMasterWorkloads = workloadRemarks.reduce<Record<string, string[]>>((result, item) => {
+    if (!item.assignedMasterId || item.id === remark.id || !["ASSIGNED", "IN_PROGRESS"].includes(item.status)) {
+      return result;
+    }
+    result[item.assignedMasterId] = [...(result[item.assignedMasterId] ?? []), item.remarkNumber];
+    return result;
+  }, {});
 
   return (
     <section className="panel">
@@ -1234,6 +1344,7 @@ function RemarkDetails({
               {branchMasters.map((master) => (
                 <option key={master.id} value={master.id}>
                   {master.fullName} · {master.position}
+                  {activeMasterWorkloads[master.id]?.length ? ` · занят: ${activeMasterWorkloads[master.id].join(", ")}` : " · свободен"}
                 </option>
               ))}
             </select>
@@ -1308,12 +1419,6 @@ function RemarkDetails({
             </button>
           </form>
         )}
-
-        {canClose && (
-          <button className="primary-button" type="button" onClick={() => run(() => api.close(remark.id), "Не удалось закрыть замечание")}>
-            <Check size={18} /> Закрыть
-          </button>
-        )}
       </div>}
     </section>
   );
@@ -1374,14 +1479,13 @@ function PendingUsers({
 }
 
 function RepairCalendarView({
-  remarks,
   onOpenRemark,
   onError,
 }: {
-  remarks: Remark[];
   onOpenRemark: (remarkId: string) => void;
   onError: (message: string) => void;
 }) {
+  const [remarks, setRemarks] = useState<Remark[]>([]);
   const [month, setMonth] = useState(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -1406,6 +1510,26 @@ function RepairCalendarView({
     date.setDate(gridStart.getDate() + index);
     return date;
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAssignedRemarks() {
+      try {
+        const loaded = await api.remarks({ page: 0, size: REMARKS_WORKLOAD_PAGE_SIZE });
+        if (!cancelled) {
+          setRemarks(loaded.content);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          onError(error instanceof Error ? error.message : "Не удалось загрузить замечания");
+        }
+      }
+    }
+    void loadAssignedRemarks();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1453,7 +1577,7 @@ function RepairCalendarView({
   }
 
   function remarkCoversDate(remark: Remark, dateKey: string) {
-    if (!remark.estimatedResolutionAt || !remark.assignedMasterId || remark.status === "RESOLVED" || remark.status === "CLOSED") {
+    if (!remark.estimatedResolutionAt || !remark.assignedMasterId || remark.status === "RESOLVED") {
       return false;
     }
     const createdDate = remark.createdAt.slice(0, 10);

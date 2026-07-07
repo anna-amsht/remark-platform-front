@@ -8,6 +8,7 @@ import type {
   RemarkCalendarEvent,
   RemarkStatus,
   RoleCode,
+  PagedRemarks,
   User,
   UserInfo,
 } from "./types";
@@ -137,7 +138,8 @@ function translateErrorMessage(message: string, status: number): string {
     [/bad credentials|invalid credentials|invalid username or password|unauthorized/i, "Неверный email или пароль."],
     [/access denied|forbidden|permission|not permitted/i, "Недостаточно прав для выполнения действия."],
     [/not found|no .* found/i, "Запрашиваемые данные не найдены."],
-    [/already exists|duplicate|conflict/i, "Такая запись уже существует."],
+    [/already exists|already registered|duplicate|conflict/i, "Такая запись уже существует."],
+    [/pending approval/i, "Заявка на регистрацию уже отправлена и ожидает одобрения."],
     [/validation|invalid|must not be blank|required/i, "Проверьте заполнение полей."],
     [/failed to fetch|networkerror|network error/i, "Не удалось подключиться к серверу."],
     [/internal server error/i, "Внутренняя ошибка сервера."],
@@ -233,12 +235,21 @@ export const api = {
     const params = new URLSearchParams({ branchId, role });
     return request<User[]>(`/api/v1/users?${params}`);
   },
-  remarks(status?: RemarkStatus, branchIdFilter?: string) {
+  remarks(options?: {
+    status?: RemarkStatus;
+    branchIdFilter?: string;
+    page?: number;
+    size?: number;
+    search?: string;
+  }) {
     const params = new URLSearchParams();
-    if (status) params.set("status", status);
-    if (branchIdFilter) params.set("branchIdFilter", branchIdFilter);
+    if (options?.status) params.set("status", options.status);
+    if (options?.branchIdFilter) params.set("branchIdFilter", options.branchIdFilter);
+    if (options?.page !== undefined) params.set("page", String(options.page));
+    if (options?.size !== undefined) params.set("size", String(options.size));
+    if (options?.search) params.set("search", options.search);
     const query = params.toString();
-    return request<Remark[]>(`/api/v1/remarks${query ? `?${query}` : ""}`);
+    return request<PagedRemarks>(`/api/v1/remarks${query ? `?${query}` : ""}`);
   },
   calendarEvents(from: string, to: string) {
     const params = new URLSearchParams({ from, to });
@@ -279,9 +290,6 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ resolutionMessage }),
     });
-  },
-  close(id: string) {
-    return request<Remark>(`/api/v1/remarks/${id}/close`, { method: "PATCH" });
   },
   reports() {
     return request<ReportNotification[]>("/api/v1/reports");
